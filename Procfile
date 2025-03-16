@@ -1,0 +1,1 @@
+worker: python src/slack_rpc_monitor.py 

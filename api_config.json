@@ -1,0 +1,7 @@
+{
+  "base_url": "https://api.ringba.com/v2",
+  "endpoint_format": "/RAb7defd67dd9d4c2f9f72af3cdfc40e32/targets",
+  "auth_format": "Bearer",
+  "response_field": "targets",
+  "account_id": "RAb7defd67dd9d4c2f9f72af3cdfc40e32"
+}

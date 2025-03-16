@@ -1,0 +1,205 @@
+1. Get Targets: @https://api.ringba.com/v2/{{accountId}}/targets 
+Path Variables: accountId Find your accountId
+Optional Query Parameters: includeStats=true (Can be added as a query parameter at the end of the url following a ? (question mark) in order to add stats for the targets)
+NOTE: If the stats are included, an object containing stats for all the targets will be displayed after the array containing details about all targets. See the "Get Targets With Stats" example to the right.
+Headers: 
+- Authorization: Token {[apiToken}}
+
+Params:
+- IncludeStats: true
+
+Example Request:|
+curl --location -g 'https://api.ringba.com/v2/{{accountId}}/targets' \
+--header 'Authorization: Token {{apiToken}}'
+
+Example Response:
+Body:
+{
+  "transactionId": "TR30b48faf-70ad-448d-87ee-d50885fcbb64",
+  "targets": [
+    {
+      "id": "TA2f6961e921ef4b92b7304dd76db8336f",
+      "instructions": {
+        "connectionTimeOut": 0,
+        "callType": "number",
+        "number": "+16317918378"
+      },
+      "isHighRateTarget": false,
+      "highRateCost": 0,
+      "ringbaNumberId": "",
+      "targetCallIncrement": "onConvert",
+      "_SearchNumer": "number:+16317918378",
+      "capsMigrated": true,
+      "conversionTimerOffset": 0,
+      "schedule": {
+        "concurrencyCap": -1,
+        "timeZoneId": "Romance Standard Time",
+        "allTimeSumCap": -1,
+        "monthlySumCap": -1,
+        "dailySumCap": -1,
+        "hourlySumCap": -1,
+        "allTimeCap": -1,
+        "monthlyCap": -1,
+        "dailyCap": -1,
+        "hourlyCap": -1
+      },
+      "blockRecordings": false,
+      "name": "Ringba Test Target",
+      "accountId": "RA25107ee2411049989cd8672852278bdb",
+      "enabled": true,
+      "version": 1
+    }
+  ]
+}
+
+2. Get Details About a Specific Target:
+@https://api.ringba.com/v2/{{accountId}}/targets/{{targetId}} 
+
+Path Variables:
+accountId Find your accountId
+targetId Find a list of targetIds
+
+Hearders:
+- Authorization: 
+Token {{apiToken}} (Find your apiToken)
+
+Example Request:
+curl --location -g 'https://api.ringba.com/v2/{{accountId}}/targets/{{targetId}}' \
+--header 'Authorization: Token {{apiToken}}'
+
+Example Response:
+Body:
+{
+  "transactionId": "TR54a64328-3375-4b0a-a802-7b2f32189d5a",
+  "target": {
+    "highRateCPM": 0,
+    "targetGroupId": "TA234457e6f96945cfa312938d4e358015",
+    "instructions": {
+      "connectionTimeOut": 0,
+      "callType": "number",
+      "number": "+16317918378"
+    },
+    "isHighRateTarget": false,
+    "targetCallIncrement": "onConvert",
+    "conversionTimerOffset": 0,
+    "schedule": {
+      "concurrencyCap": -1,
+      "timeZoneId": "Romance Standard Time",
+      "allTimeSumCap": -1,
+      "monthlySumCap": -1,
+      "dailySumCap": -1,
+      "hourlySumCap": -1,
+      "allTimeCap": -1,
+      "monthlyCap": -1,
+      "dailyCap": -1,
+      "hourlyCap": -1
+    },
+    "blockRecordings": false,
+    "id": "TA2f6961e921ef4b92b7304dd76db8336f",
+    "name": "Ringba Test Target",
+    "accountId": "RA25107ee2411049989cd8672852278bdb",
+    "enabled": true,
+    "version": 1
+  },
+  "stats": {
+    "tA234457e6f96945cfa312938d4e358015": {
+      "total": 0,
+      "currentMonth": 0,
+      "currentDay": 0,
+      "currentHour": 0,
+      "currentLive": 0
+    },
+    "tA2f6961e921ef4b92b7304dd76db8336f": {
+      "totalSum": 0,
+      "currentMonthSum": 0,
+      "currentHourSum": 0,
+      "currentDaySum": 0,
+      "total": 11,
+      "currentMonth": 5,
+      "currentDay": 0,
+      "currentHour": 0,
+      "currentLive": 0
+    }
+  },
+  "caps": {
+    "hourSum": -1,
+    "daySum": -1,
+    "monthSum": -1,
+    "totalSum": -1,
+    "live": -1,
+    "isGroup": false,
+    "hour": -1,
+    "day": -1,
+    "month": -1,
+    "total": -1
+  }
+}
+
+3. Get Stats for a Specific Target: @https://api.ringba.com/v2/{{accountId}}/targets/{{targetId}}/Counts 
+
+Path Variables:
+- accountId (Find your accountId)
+- targetId (Find a list of targetIds)
+
+Headers:
+- Authorization: Token {{apiToken}}
+Find your apiToken
+
+Example Request:
+curl --location -g 'https://api.ringba.com/v2/{{accountId}}/targets/{{targetId}}/Counts' \
+--header 'Authorization: Token {{apiToken}}'
+
+Example Response:
+Body:
+{
+  "transactionId": "TR31450cf5-309e-41a0-9d92-d994bf0bf1d6",
+  "stats": {
+    "tA2f6961e921ef4b92b7304dd76db8336f": {
+      "totalSum": 0,
+      "currentMonthSum": 0,
+      "currentHourSum": 0,
+      "currentDaySum": 0,
+      "total": 10,
+      "currentMonth": 4,
+      "currentDay": 0,
+      "currentHour": 0,
+      "currentLive": 0
+    }
+  }
+}
+
+4. Get Inbound References for a Specific Target: @https://api.ringba.com/v2/{{accountId}}/targets/{{targetId}}/InboundReferences 
+
+Path Variables: 
+- accountId (Find your accountId)
+- targetId (Find a list of targetIds)
+
+Headers:
+- Authorization: Token {{apiToken}}
+(Find your apiToken)
+
+Example Request:
+curl --location -g 'https://api.ringba.com/v2/{{accountId}}/targets/{{targetId}}/InboundReferences' \
+--header 'Authorization: Token {{apiToken}}'
+
+Example Response:
+Body:
+{
+  "transactionId": "TR73807c87-2bfb-4c9c-9801-254848b65fd7",
+  "id": "TA2f6961e921ef4b92b7304dd76db8336f",
+  "hasReferences": true,
+  "refByAccount": true,
+  "campaigns": [
+    {
+      "campaignId": "CAa2714586592f464f817efc493f3a4b50",
+      "campaignName": "RINGBA TEST CAMPAIGN",
+      "campaignDefaultTarget": "false"
+    },
+    {
+      "campaignId": "CA74c0b7f1f3824246b73e72a9238b4bfc",
+      "campaignName": "API Test",
+      "campaignDefaultTarget": "false",
+      "campaignNoRoutes": "1"
+    }
+  ]
+}
