@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Ringba RPC Monitor with Slack Integration
+Improved Ringba RPC Monitor with Slack Integration using Direct API
 
-This script performs two daily checks:
+This script performs two daily checks using Ringba's direct insights API:
 1. Morning check (10am EST): Finds all targets with RPC above $10
 2. Afternoon check (3pm EST): Checks if any morning targets fell below $10 RPC
 
@@ -21,8 +21,8 @@ import pytz
 import pickle
 import schedule
 
-# Import custom modules
-from ringba_api import RingbaAPI
+# Import the new direct API client
+from ringba_direct_api import RingbaDirectAPI
 
 # Set up logging
 logging.basicConfig(
@@ -30,10 +30,10 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('slack_rpc_monitor.log')
+        logging.FileHandler('direct_rpc_monitor.log')
     ]
 )
-logger = logging.getLogger('slack_rpc_monitor')
+logger = logging.getLogger('direct_rpc_monitor')
 
 # File to store morning targets
 MORNING_TARGETS_FILE = 'morning_targets.pkl'
@@ -96,11 +96,25 @@ def format_target_for_slack(target, is_morning=True):
     emoji = ":chart_with_upwards_trend:" if is_morning else ":chart_with_downwards_trend:"
     color = "#36a64f" if is_morning else "#ff5252"
     
+    # Format tags information if available
+    tags_text = ""
+    if target.get('tags'):
+        tags = target['tags']
+        if isinstance(tags, dict):
+            # Tags are in format {tag_name: count}
+            top_tags = sorted(tags.items(), key=lambda x: x[1], reverse=True)[:3]  # Get top 3 tags
+            if top_tags:
+                tags_text = "\n:label: *Tags*: " + ", ".join([f"{tag} ({count})" for tag, count in top_tags])
+        elif isinstance(tags, list):
+            # Tags are in a list format
+            if len(tags) > 0:
+                tags_text = "\n:label: *Tags*: " + ", ".join(tags[:3])  # Show up to 3 tags
+    
     return {
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"*{target['name']}*\n{emoji} RPC: *${target['rpc']:.2f}* | Calls: {target.get('calls', 'N/A')} | Revenue: ${target.get('revenue', 0):.2f}"
+            "text": f"*{target['name']}*\n{emoji} RPC: *${target['rpc']:.2f}* | Calls: {target.get('calls', 'N/A')} | Revenue: ${target.get('revenue', 0):.2f}{tags_text}"
         },
         "accessory": {
             "type": "button",
@@ -115,6 +129,7 @@ def format_target_for_slack(target, is_morning=True):
 def morning_check():
     """
     Perform the morning check (10am EST) to find targets with RPC above threshold
+    using the direct insights API
     """
     logger.info(f"Performing morning check for targets with RPC above ${RPC_THRESHOLD}")
     
@@ -129,8 +144,8 @@ def morning_check():
         logger.error("Missing API token or account ID in .env file")
         return
     
-    # Initialize API
-    api = RingbaAPI(api_token, account_id)
+    # Initialize the direct API client
+    api = RingbaDirectAPI(api_token, account_id)
     
     # Test authentication
     if not api.test_auth():
@@ -140,53 +155,13 @@ def morning_check():
     
     # Get today's date
     today = datetime.now().strftime('%Y-%m-%d')
+    logger.info(f"Checking real-time data for date: {today} at {datetime.now().strftime('%H:%M:%S')}")
     
-    # Get all targets
-    response = api.get_all_targets()
-    if not response or 'targets' not in response:
-        logger.error("Failed to retrieve targets")
-        send_slack_message(f"⚠️ *ALERT*: Failed to retrieve targets during morning check")
-        return
+    # Get targets above threshold using the direct method
+    targets_above_threshold = api.get_targets_above_threshold(RPC_THRESHOLD, today)
     
-    targets = response['targets']
-    logger.info(f"Raw API response contains {len(targets)} targets")
-    
-    # Sample the first target to see its structure
-    if targets and len(targets) > 0:
-        logger.info(f"Sample target structure: {targets[0]}")
-    
-    # Filter enabled targets
-    enabled_targets = [t for t in targets if isinstance(t, dict) and t.get('enabled', False)]
-    
-    logger.info(f"Found {len(enabled_targets)} enabled targets out of {len(targets)} total targets")
-    
-    # Collect RPC data for enabled targets
-    targets_above_threshold = []
-    
-    for target in enabled_targets:
-        target_id = target.get('id')
-        target_name = target.get('name', 'Unknown')
-        
-        # Calculate RPC for this target
-        rpc = api.calculate_rpc_for_target(target_id, today)
-        
-        if rpc is not None and rpc >= RPC_THRESHOLD:
-            # Get the calls and revenue
-            counts = api.get_target_counts(target_id, today)
-            calls = 0
-            revenue = 0
-            
-            if counts and isinstance(counts, dict):
-                calls = counts.get('totalCalls', 0)
-                revenue = counts.get('payout', 0)
-            
-            targets_above_threshold.append({
-                'id': target_id,
-                'name': target_name,
-                'rpc': rpc,
-                'calls': calls,
-                'revenue': revenue
-            })
+    # Log the number of targets found
+    logger.info(f"Found {len(targets_above_threshold)} targets above RPC threshold")
     
     # Save the targets above threshold for afternoon comparison
     with open(MORNING_TARGETS_FILE, 'wb') as f:
@@ -198,12 +173,13 @@ def morning_check():
         targets_above_threshold.sort(key=lambda x: x['rpc'], reverse=True)
         
         # Prepare Slack message
+        current_time = datetime.now().strftime('%I:%M %p ET')
         blocks = [
             {
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f"🔔 Morning RPC Alert - {today}",
+                    "text": f"🔔 Morning RPC Alert - {today} at {current_time}",
                     "emoji": True
                 }
             },
@@ -211,7 +187,7 @@ def morning_check():
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*{len(targets_above_threshold)}* targets have RPC above *${RPC_THRESHOLD}*"
+                    "text": f"*{len(targets_above_threshold)}* targets have RPC above *${RPC_THRESHOLD}* as of {current_time}"
                 }
             },
             {"type": "divider"}
@@ -223,19 +199,21 @@ def morning_check():
         
         # Send to Slack
         send_slack_message(
-            f"Morning RPC Alert: {len(targets_above_threshold)} targets above ${RPC_THRESHOLD}",
+            f"Morning RPC Alert: {len(targets_above_threshold)} targets above ${RPC_THRESHOLD} as of {current_time}",
             blocks=blocks
         )
         
         logger.info(f"Found {len(targets_above_threshold)} targets above ${RPC_THRESHOLD} RPC in morning check")
     else:
         # Send notification that no targets are above threshold
-        send_slack_message(f"🔔 Morning RPC Alert: No targets found with RPC above ${RPC_THRESHOLD}")
+        current_time = datetime.now().strftime('%I:%M %p ET')
+        send_slack_message(f"🔔 Morning RPC Alert: No targets found with RPC above ${RPC_THRESHOLD} as of {current_time}")
         logger.info("No targets found above RPC threshold in morning check")
 
 def afternoon_check():
     """
     Perform the afternoon check (3pm EST) to find morning targets that fell below threshold
+    using the direct insights API
     """
     logger.info(f"Performing afternoon check for targets that fell below ${RPC_THRESHOLD}")
     
@@ -268,8 +246,8 @@ def afternoon_check():
         logger.info("No morning targets were above threshold. Nothing to check.")
         return
     
-    # Initialize API
-    api = RingbaAPI(api_token, account_id)
+    # Initialize the direct API client
+    api = RingbaDirectAPI(api_token, account_id)
     
     # Test authentication
     if not api.test_auth():
@@ -279,8 +257,63 @@ def afternoon_check():
     
     # Get today's date
     today = datetime.now().strftime('%Y-%m-%d')
+    logger.info(f"Checking real-time data for date: {today} at {datetime.now().strftime('%H:%M:%S')}")
     
-    # Check each morning target
+    # Get current insights data for all targets
+    insights_data = api.get_insights(start_date=today, end_date=today, group_by="targetId")
+    
+    if not insights_data or "items" not in insights_data:
+        logger.error("Failed to get insights data for afternoon check")
+        send_slack_message(f"⚠️ *ALERT*: Failed to retrieve current RPC data during afternoon check")
+        return
+    
+    # Get call logs to extract tag information
+    call_logs = api.get_call_logs(start_date=today, end_date=today)
+    calls_by_target = {}
+    
+    # Group calls by target and collect tag information
+    if call_logs and "items" in call_logs:
+        for call in call_logs.get("items", []):
+            target_id = call.get("targetId")
+            if target_id:
+                if target_id not in calls_by_target:
+                    calls_by_target[target_id] = []
+                calls_by_target[target_id].append(call)
+    
+    # Get tag information
+    tags_info = api.get_tags()
+    tags_dict = {t.get('id'): t for t in tags_info if 'id' in t}
+    
+    # Create a dictionary of current RPC values by target ID
+    current_rpc_by_target = {}
+    for item in insights_data.get("items", []):
+        target_id = item.get("targetId")
+        if target_id:
+            rpc = item.get("rpc", 0)
+            calls = item.get("calls", 0)
+            revenue = item.get("revenue", 0)
+            
+            # Extract tag information from calls for this target
+            target_calls = calls_by_target.get(target_id, [])
+            target_tags = {}
+            
+            for call in target_calls:
+                tag_ids = call.get("tagIds", [])
+                for tag_id in tag_ids:
+                    tag_info = tags_dict.get(tag_id, {})
+                    tag_name = tag_info.get("name", "Unknown Tag")
+                    if tag_name not in target_tags:
+                        target_tags[tag_name] = 0
+                    target_tags[tag_name] += 1
+            
+            current_rpc_by_target[target_id] = {
+                'rpc': rpc,
+                'calls': calls,
+                'revenue': revenue,
+                'tags': target_tags
+            }
+    
+    # Check each morning target to see if RPC fell below threshold
     targets_below_threshold = []
     
     for target in morning_targets:
@@ -288,19 +321,11 @@ def afternoon_check():
         target_name = target.get('name', 'Unknown')
         morning_rpc = target.get('rpc', 0)
         
-        # Calculate current RPC
-        current_rpc = api.calculate_rpc_for_target(target_id, today)
+        # Get current RPC data
+        current_data = current_rpc_by_target.get(target_id, {})
+        current_rpc = current_data.get('rpc', 0)
         
-        if current_rpc is not None and current_rpc < RPC_THRESHOLD:
-            # Get the calls and revenue
-            counts = api.get_target_counts(target_id, today)
-            calls = 0
-            revenue = 0
-            
-            if counts and isinstance(counts, dict):
-                calls = counts.get('totalCalls', 0)
-                revenue = counts.get('payout', 0)
-            
+        if current_rpc < RPC_THRESHOLD:
             # Calculate the RPC change
             rpc_change = current_rpc - morning_rpc
             
@@ -310,8 +335,9 @@ def afternoon_check():
                 'rpc': current_rpc,
                 'morning_rpc': morning_rpc,
                 'rpc_change': rpc_change,
-                'calls': calls,
-                'revenue': revenue
+                'calls': current_data.get('calls', 0),
+                'revenue': current_data.get('revenue', 0),
+                'tags': current_data.get('tags', {})
             })
     
     # Send Slack notification if any targets fell below threshold
@@ -320,12 +346,13 @@ def afternoon_check():
         targets_below_threshold.sort(key=lambda x: x['rpc_change'])
         
         # Prepare Slack message
+        current_time = datetime.now().strftime('%I:%M %p ET')
         blocks = [
             {
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f"🔔 Afternoon RPC Alert - {today}",
+                    "text": f"🔔 Afternoon RPC Alert - {today} at {current_time}",
                     "emoji": True
                 }
             },
@@ -341,11 +368,25 @@ def afternoon_check():
         
         # Add each target as a block
         for target in targets_below_threshold:
+            # Format tags information
+            tags_text = ""
+            if target.get('tags'):
+                tags = target['tags']
+                if isinstance(tags, dict):
+                    # Tags are in format {tag_name: count}
+                    top_tags = sorted(tags.items(), key=lambda x: x[1], reverse=True)[:3]  # Get top 3 tags
+                    if top_tags:
+                        tags_text = "\n:label: *Tags*: " + ", ".join([f"{tag} ({count})" for tag, count in top_tags])
+                elif isinstance(tags, list):
+                    # Tags are in a list format
+                    if len(tags) > 0:
+                        tags_text = "\n:label: *Tags*: " + ", ".join(tags[:3])  # Show up to 3 tags
+            
             blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*{target['name']}*\n:chart_with_downwards_trend: Morning RPC: *${target['morning_rpc']:.2f}* → Current RPC: *${target['rpc']:.2f}* (Change: ${target['rpc_change']:.2f})\nCalls: {target.get('calls', 'N/A')} | Revenue: ${target.get('revenue', 0):.2f}"
+                    "text": f"*{target['name']}*\n:chart_with_downwards_trend: Morning RPC: *${target['morning_rpc']:.2f}* → Current RPC: *${target['rpc']:.2f}* (Change: ${target['rpc_change']:.2f})\nCalls: {target.get('calls', 'N/A')} | Revenue: ${target.get('revenue', 0):.2f}{tags_text}"
                 },
                 "accessory": {
                     "type": "button",
@@ -359,7 +400,7 @@ def afternoon_check():
         
         # Send to Slack
         send_slack_message(
-            f"Afternoon RPC Alert: {len(targets_below_threshold)} targets fell below ${RPC_THRESHOLD}",
+            f"Afternoon RPC Alert: {len(targets_below_threshold)} targets fell below ${RPC_THRESHOLD} as of {current_time}",
             blocks=blocks
         )
         
@@ -367,7 +408,8 @@ def afternoon_check():
     else:
         # Send notification that no targets fell below threshold
         morning_count = len(morning_targets)
-        send_slack_message(f"🔔 Afternoon RPC Alert: All {morning_count} morning targets are still above ${RPC_THRESHOLD} RPC")
+        current_time = datetime.now().strftime('%I:%M %p ET')
+        send_slack_message(f"🔔 Afternoon RPC Alert: All {morning_count} morning targets are still above ${RPC_THRESHOLD} RPC as of {current_time}")
         logger.info(f"No targets fell below RPC threshold in afternoon check out of {morning_count} morning targets")
 
 def manual_run():
@@ -383,13 +425,17 @@ def schedule_jobs():
     # Define timezone for EST
     eastern = pytz.timezone('US/Eastern')
     
-    # Schedule the morning check at 10am EST
-    schedule.every().day.at("10:00").do(morning_check)
-    logger.info("Scheduled morning check for 10:00am EST")
+    # Get scheduled times from environment variables
+    morning_check_time = os.getenv('MORNING_CHECK_TIME', '10:00')  # Default to 10:00 AM if not set
+    afternoon_check_time = os.getenv('AFTERNOON_CHECK_TIME', '15:00')  # Default to 3:00 PM if not set
     
-    # Schedule the afternoon check at 3pm EST
-    schedule.every().day.at("15:00").do(afternoon_check)
-    logger.info("Scheduled afternoon check for 3:00pm EST")
+    # Schedule the morning check
+    schedule.every().day.at(morning_check_time).do(morning_check)
+    logger.info(f"Scheduled morning check for {morning_check_time} EST")
+    
+    # Schedule the afternoon check
+    schedule.every().day.at(afternoon_check_time).do(afternoon_check)
+    logger.info(f"Scheduled afternoon check for {afternoon_check_time} EST")
     
     # Run the scheduler
     logger.info("Starting scheduler. Press Ctrl+C to exit.")
@@ -418,7 +464,7 @@ if __name__ == "__main__":
             manual_run()
         else:
             print(f"Unknown argument: {sys.argv[1]}")
-            print("Usage: python slack_rpc_monitor.py [morning|afternoon|test]")
+            print("Usage: python direct_rpc_monitor.py [morning|afternoon|test]")
             print("       If no arguments are provided, the script will run as a scheduler")
     else:
         # Run as scheduler by default

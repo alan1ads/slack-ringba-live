@@ -216,67 +216,28 @@ class RingbaAPI:
             logger.error(f"Exception fetching counts: {str(e)}")
             return None
     
-    def calculate_rpc_for_target(self, target_id, date_str=None):
-        """
-        Calculate Revenue Per Call (RPC) for a specific target
+    def calculate_rpc_for_target(self, target_id, date):
+        """Calculate RPC for a target on a specific date"""
+        counts = self.get_target_counts(target_id, date)
         
-        Args:
-            target_id (str): The ID of the target
-            date_str (str, optional): The date string in format YYYY-MM-DD. Defaults to today.
-            
-        Returns:
-            float: The calculated RPC, or None if calculation fails
-        """
-        target_details = self.get_target_details(target_id)
-        if not target_details:
-            return None
+        if not counts or not isinstance(counts, dict):
+            logger.info(f"No valid counts data for target ID: {target_id}")
+            return 0
         
-        target_name = target_details.get('name', 'Unknown')
-        logger.info(f"Calculating RPC for target: {target_name} (ID: {target_id}) on {date_str}")
+        # Log the raw counts data to debug
+        logger.info(f"Target {target_id} raw counts data: {counts}")
         
-        counts = self.get_target_counts(target_id, date_str)
-        if not counts:
-            return None
+        calls = counts.get('totalCalls', 0)
+        revenue = counts.get('payout', 0)
         
-        try:
-            # Check for the new response format with 'stats' field
-            if isinstance(counts, list) and 'transactionId' in counts and 'stats' in counts:
-                logger.info("Processing stats format")
-                stats = counts[1]  # The stats data should be in the second element
-                
-                if isinstance(stats, dict):
-                    total_calls = stats.get('totalCalls', 0)
-                    payout = stats.get('payout', 0)
-                    
-                    if total_calls > 0:
-                        rpc = payout / total_calls
-                        logger.info(f"Target: {target_name}, Total Calls: {total_calls}, Payout: ${payout}, RPC: ${rpc:.2f}")
-                        return rpc
-                    else:
-                        logger.info(f"Target: {target_name}, No calls recorded for the date")
-                        return 0
-                else:
-                    logger.error(f"Unexpected stats format: {type(stats)}")
-                    return None
-            
-            # Original format handling
-            elif isinstance(counts, dict):
-                total_calls = counts.get('totalCalls', 0)
-                payout = counts.get('payout', 0)
-                
-                if total_calls > 0:
-                    rpc = payout / total_calls
-                    logger.info(f"Target: {target_name}, Total Calls: {total_calls}, Payout: ${payout}, RPC: ${rpc:.2f}")
-                    return rpc
-                else:
-                    logger.info(f"Target: {target_name}, No calls recorded for the date")
-                    return 0
-            else:
-                logger.error(f"Unrecognized counts data format: {list(counts.keys()) if isinstance(counts, dict) else counts}")
-                return None
-        except Exception as e:
-            logger.error(f"Error calculating RPC for target {target_name}: {str(e)}")
-            return None
+        if calls == 0:
+            logger.info(f"Target {target_id} has 0 calls, returning RPC of 0")
+            return 0
+        
+        rpc = revenue / calls
+        logger.info(f"Target {target_id} has {calls} calls, ${revenue} revenue, RPC: ${rpc:.2f}")
+        
+        return rpc
     
     def find_targets_above_threshold(self, threshold, date_str=None):
         """
