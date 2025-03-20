@@ -79,6 +79,12 @@ def setup_browser():
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     
+    # On render.com, specify the Chrome binary location
+    # For render.com's specific environment
+    chrome_location = '/usr/bin/google-chrome-stable'
+    if os.path.exists(chrome_location):
+        options.binary_location = chrome_location
+    
     # Set up download directory to current folder
     download_dir = os.path.abspath(os.getcwd())
     
@@ -102,7 +108,14 @@ def setup_browser():
     
     while retry_count < max_retries:
         try:
-            browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            # Try to use service but handle if chromedriver isn't available
+            try:
+                browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            except Exception as chrome_error:
+                logger.warning(f"Error with ChromeDriverManager: {str(chrome_error)}")
+                # Try fallback without service
+                browser = webdriver.Chrome(options=options)
+            
             logger.info("Browser set up successfully")
             return browser
         except Exception as e:
