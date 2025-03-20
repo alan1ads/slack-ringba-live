@@ -47,11 +47,44 @@ def take_screenshot(browser, name):
     """Take a screenshot for debugging purposes"""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Make sure the screenshots directory exists
+        if not os.path.exists(screenshots_dir):
+            os.makedirs(screenshots_dir)
+            
         filename = f"{screenshots_dir}/{timestamp}_{name}.png"
-        browser.save_screenshot(filename)
+        
+        # Try different methods to take a screenshot
+        try:
+            # Standard method
+            browser.save_screenshot(filename)
+        except Exception as first_error:
+            try:
+                # Try to get screenshot via execute_script
+                screenshot = browser.execute_script("""
+                    var canvas = document.createElement('canvas');
+                    var context = canvas.getContext('2d');
+                    var width = window.innerWidth;
+                    var height = window.innerHeight;
+                    canvas.width = width;
+                    canvas.height = height;
+                    context.drawWindow(window, 0, 0, width, height, 'rgb(255,255,255)');
+                    return canvas.toDataURL('image/png');
+                """)
+                
+                # Save the Base64 image
+                import base64
+                with open(filename, 'wb') as f:
+                    f.write(base64.b64decode(screenshot.split(',')[1]))
+                    
+            except Exception as second_error:
+                logger.error(f"Failed to take screenshot via alternative method: {str(second_error)}")
+                return
+                
         logger.info(f"Screenshot saved: {filename}")
     except Exception as e:
         logger.error(f"Failed to take screenshot: {str(e)}")
+        # Don't raise the exception, just log it
 
 def setup_browser():
     """Set up and configure the browser for automation"""
@@ -72,31 +105,42 @@ def setup_browser():
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
+        
+        # Additional flags for stability in Docker environments
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--remote-debugging-port=9222")
+        options.add_argument("--disable-web-security")
+        options.add_argument("--allow-running-insecure-content")
     else:
         logger.info("Running in visible mode")
+    
+    # Get additional Chrome options from environment if available
+    chrome_options_env = os.getenv("CHROME_OPTIONS", "")
+    if chrome_options_env:
+        logger.info(f"Adding Chrome options from environment: {chrome_options_env}")
+        for option in chrome_options_env.split():
+            if option and not option.isspace():
+                options.add_argument(option)
     
     # Disable automation flags to avoid detection
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     
-    # On render.com, specify the Chrome binary location
-    # For render.com's specific environment
-    chrome_location = '/usr/bin/google-chrome-stable'
-    if os.path.exists(chrome_location):
-        options.binary_location = chrome_location
-    
-    # Set up download directory to current folder
-    download_dir = os.path.abspath(os.getcwd())
+    # Set page load strategy to eager for faster loading
+    options.page_load_strategy = 'eager'
     
     # For render.com, ensure the download directory exists and is writable
+    download_dir = os.path.abspath(os.getcwd())
     download_dir = os.getenv("DOWNLOAD_DIR", download_dir)
     os.makedirs(download_dir, exist_ok=True)
     
+    # Set up download directory to current folder
     prefs = {
         "download.default_directory": download_dir,
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "safebrowsing.enabled": True,
+        "safebrowsing.enabled": False,
         "credentials_enable_service": True,
         "profile.password_manager_enabled": True
     }
@@ -108,22 +152,37 @@ def setup_browser():
     
     while retry_count < max_retries:
         try:
-            # Try to use service but handle if chromedriver isn't available
-            try:
-                browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-            except Exception as chrome_error:
-                logger.warning(f"Error with ChromeDriverManager: {str(chrome_error)}")
-                # Try fallback without service
-                browser = webdriver.Chrome(options=options)
+            logger.info("Initializing Chrome browser...")
+            service = Service(ChromeDriverManager().install())
+            browser = webdriver.Chrome(service=service, options=options)
+            
+            # Set page load timeout
+            browser.set_page_load_timeout(90)
             
             logger.info("Browser set up successfully")
             return browser
         except Exception as e:
             retry_count += 1
             logger.error(f"Failed to set up browser (attempt {retry_count}/{max_retries}): {str(e)}")
+            
+            # Try a simplified approach if regular setup fails
+            if retry_count == max_retries - 1:
+                try:
+                    logger.info("Trying simplified browser setup...")
+                    options = Options()
+                    options.add_argument("--headless=new")
+                    options.add_argument("--no-sandbox")
+                    options.add_argument("--disable-dev-shm-usage")
+                    browser = webdriver.Chrome(options=options)
+                    logger.info("Simplified browser setup successful")
+                    return browser
+                except Exception as simple_error:
+                    logger.error(f"Simplified browser setup failed: {str(simple_error)}")
+            
             if retry_count >= max_retries:
                 logger.error("Max retries reached for browser setup, giving up")
                 return None
+            
             time.sleep(5)  # Wait before retrying
 
 def login_to_ringba(browser, username=None, password=None):
@@ -286,55 +345,108 @@ def login_to_ringba(browser, username=None, password=None):
         return False
 
 def navigate_to_call_logs(browser):
-    """Navigate directly to the call logs page"""
-    try:
-        call_logs_url = "https://app.ringba.com/#/dashboard/call-logs/report/new"
-        logger.info(f"Navigating to call logs page: {call_logs_url}")
-        browser.get(call_logs_url)
-        
-        # Take screenshot after navigation
-        time.sleep(3)
-        take_screenshot(browser, "after_navigation_to_call_logs")
-        
-        # Wait for the page to load with multiple possible selectors
-        logger.info("Waiting for call logs page to load...")
-        
-        call_logs_selectors = [
-            (By.CSS_SELECTOR, ".reporting-call-logs-data"),
-            (By.CSS_SELECTOR, ".reporting-main-container--call-logs"),
-            (By.CSS_SELECTOR, ".call-log-vue-container"),
-            (By.CSS_SELECTOR, ".reporting-call-logs-header"),
-            (By.XPATH, "//h1[text()='Summary']"), # Try to find the Summary header
-            (By.CSS_SELECTOR, ".btn.export-csv") # Try to find the Export CSV button itself
-        ]
-        
-        page_loaded = False
-        for selector_type, selector_value in call_logs_selectors:
+    """Navigate to call logs page"""
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            # Navigate to call logs
+            call_logs_url = "https://app.ringba.com/#/dashboard/call-logs/report/new"
+            logger.info(f"Navigating to call logs page: {call_logs_url}")
+            
             try:
-                WebDriverWait(browser, 120).until(
-                    EC.presence_of_element_located((selector_type, selector_value))
-                )
-                logger.info(f"Call logs page detected with selector: {selector_type}={selector_value}")
-                page_loaded = True
-                break
-            except:
-                continue
+                browser.get(call_logs_url)
+            except Exception as e:
+                logger.error(f"Error loading call logs page: {str(e)}")
+                # Try to refresh the page if there was an error
+                try:
+                    browser.refresh()
+                    time.sleep(5)
+                except:
+                    pass
                 
-        if not page_loaded:
-            logger.error("Call logs page did not load")
-            take_screenshot(browser, "call_logs_page_not_loaded")
-            return False
+                # Try direct navigation again
+                browser.get(call_logs_url)
+            
+            # Take screenshot if possible
+            try:
+                take_screenshot(browser, "after_navigation_to_call_logs")
+            except Exception as ss_error:
+                logger.error(f"Failed to take screenshot: {str(ss_error)}")
+            
+            # Wait for call logs page to load with multiple selectors
+            logger.info("Waiting for call logs page to load...")
+            
+            call_logs_selectors = [
+                (By.CSS_SELECTOR, ".reporting-call-logs-data"),
+                (By.CSS_SELECTOR, ".page-content"),
+                (By.XPATH, "//h1[contains(text(), 'Call Logs')]"),
+                (By.CSS_SELECTOR, ".call-logs-container")
+            ]
+            
+            page_loaded = False
+            for selector_type, selector_value in call_logs_selectors:
+                try:
+                    WebDriverWait(browser, 30).until(
+                        EC.presence_of_element_located((selector_type, selector_value))
+                    )
+                    logger.info(f"Call logs page detected with selector: {selector_type}={selector_value}")
+                    page_loaded = True
+                    break
+                except Exception as wait_error:
+                    logger.warning(f"Selector {selector_type}={selector_value} not found: {str(wait_error)}")
+                    continue
+            
+            if not page_loaded:
+                # If we've reached max retries, report failure
+                if retry_count >= max_retries - 1:
+                    logger.error("Call logs page did not load")
+                    take_screenshot(browser, "call_logs_page_not_loaded")
+                    return False
+                
+                # Otherwise, increment retry counter and try again
+                retry_count += 1
+                logger.warning(f"Call logs page not loaded, retrying ({retry_count}/{max_retries})...")
+                time.sleep(5)
+                continue
+            
+            # Wait a bit longer after the page appears to be loaded
+            time.sleep(10)
+            
+            # Take screenshot after page loads
+            try:
+                take_screenshot(browser, "call_logs_page_loaded")
+            except Exception as ss_error:
+                logger.error(f"Failed to take screenshot: {str(ss_error)}")
+            
+            logger.info("Successfully navigated to call logs page")
+            return True
         
-        # Give additional time for page to fully render
-        time.sleep(10)
-        take_screenshot(browser, "call_logs_page_loaded")
-        
-        logger.info("Successfully navigated to call logs page")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to navigate to call logs page: {str(e)}")
-        take_screenshot(browser, "navigation_exception")
-        return False
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"Navigation error (attempt {retry_count}/{max_retries}): {str(e)}")
+            
+            # If we've reached max retries, report failure
+            if retry_count >= max_retries:
+                logger.error("Failed to navigate to call logs after multiple attempts")
+                return False
+            
+            # Restart the browser if navigation fails
+            try:
+                browser.quit()
+            except:
+                pass
+            
+            logger.info("Restarting browser...")
+            browser = setup_browser()
+            
+            # Re-login if we had to restart the browser
+            if not login_to_ringba(browser):
+                logger.error("Login failed after browser restart. Aborting navigation.")
+                return False
+            
+            time.sleep(5)  # Wait before retrying
 
 def set_date_range(browser, start_date, end_date):
     """Set the date range for call logs"""
