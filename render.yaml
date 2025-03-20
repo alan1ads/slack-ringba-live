@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: cron
     name: ringba-csv-exporter
     env: python
     buildCommand: pip install -r requirements.txt
@@ -25,4 +25,6 @@ services:
         value: 15:00
       - key: TZ
         value: America/New_York
+      - key: SLACK_WEBHOOK_URL
+        sync: false
     schedule: "0 10,15 * * *" # Runs at 10 AM and 3 PM in the TZ timezone 
