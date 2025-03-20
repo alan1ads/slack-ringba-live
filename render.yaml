@@ -25,4 +25,4 @@ services:
         value: 15:00
       - key: TZ
         value: America/New_York
-    cron: "0 10,15 * * * America/New_York" # Runs at 10 AM and 3 PM EST every day 
+    schedule: "0 10,15 * * *" # Runs at 10 AM and 3 PM in the TZ timezone 
