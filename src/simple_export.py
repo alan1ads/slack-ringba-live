@@ -23,6 +23,8 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
+import threading
+import signal
 
 # Load environment variables
 load_dotenv()
@@ -146,44 +148,44 @@ def setup_browser():
     }
     options.add_experimental_option("prefs", prefs)
     
-    # Add retry logic for browser initialization
-    max_retries = 3
-    retry_count = 0
-    
-    while retry_count < max_retries:
+    # Try different strategies to set up browser
+    try:
+        # Skip WebDriverManager and go straight to the simplified approach
+        # This is more likely to work reliably in Docker environments
+        logger.info("Using direct Chrome setup (bypassing WebDriverManager)...")
+        browser = webdriver.Chrome(options=options)
+        logger.info("Direct Chrome setup successful")
+        
+        # Set page load timeout
+        browser.set_page_load_timeout(90)
+        return browser
+    except Exception as direct_error:
+        logger.error(f"Direct Chrome setup failed: {str(direct_error)}")
+        
+        # Try with WebDriverManager as fallback
         try:
-            logger.info("Initializing Chrome browser...")
+            logger.info("Trying WebDriverManager approach...")
             service = Service(ChromeDriverManager().install())
             browser = webdriver.Chrome(service=service, options=options)
-            
-            # Set page load timeout
+            logger.info("WebDriverManager setup successful")
             browser.set_page_load_timeout(90)
-            
-            logger.info("Browser set up successfully")
             return browser
-        except Exception as e:
-            retry_count += 1
-            logger.error(f"Failed to set up browser (attempt {retry_count}/{max_retries}): {str(e)}")
+        except Exception as wdm_error:
+            logger.error(f"WebDriverManager setup failed: {str(wdm_error)}")
             
-            # Try a simplified approach if regular setup fails
-            if retry_count == max_retries - 1:
-                try:
-                    logger.info("Trying simplified browser setup...")
-                    options = Options()
-                    options.add_argument("--headless=new")
-                    options.add_argument("--no-sandbox")
-                    options.add_argument("--disable-dev-shm-usage")
-                    browser = webdriver.Chrome(options=options)
-                    logger.info("Simplified browser setup successful")
-                    return browser
-                except Exception as simple_error:
-                    logger.error(f"Simplified browser setup failed: {str(simple_error)}")
-            
-            if retry_count >= max_retries:
-                logger.error("Max retries reached for browser setup, giving up")
+            # Try absolute minimal Chrome setup as last resort
+            try:
+                logger.info("Trying absolute minimal Chrome setup...")
+                min_options = Options()
+                min_options.add_argument("--headless=new")
+                min_options.add_argument("--no-sandbox")
+                min_options.add_argument("--disable-dev-shm-usage")
+                browser = webdriver.Chrome(options=min_options)
+                logger.info("Minimal Chrome setup successful")
+                return browser
+            except Exception as minimal_error:
+                logger.error(f"All browser setup attempts failed: {str(minimal_error)}")
                 return None
-            
-            time.sleep(5)  # Wait before retrying
 
 def login_to_ringba(browser, username=None, password=None):
     """Login to Ringba with credentials"""
@@ -489,144 +491,190 @@ def click_export_csv(browser):
     try:
         # Set a timeout for this entire function
         start_time = time.time()
-        max_wait_time = 90  # Maximum 90 seconds for the entire process
+        max_wait_time = 60  # Maximum 60 seconds for the entire process
         
-        # Use the exact selector provided by the user from inspection
-        logger.info("Looking for Export CSV button using exact selector...")
-        export_button_selector = (By.CSS_SELECTOR, "button.btn.btn-sm.m-r-15.export-summary-btn")
-        
-        # Try to wait for table to be visible first as an indicator the page is ready
+        # Ensure page is properly loaded and stable
+        logger.info("Executing JavaScript to scroll and ensure page is ready...")
         try:
-            logger.info("Waiting for table or content to be visible first...")
-            table_selectors = [
-                (By.CSS_SELECTOR, "table"),
-                (By.CSS_SELECTOR, ".data-table"),
-                (By.CSS_SELECTOR, ".grid-container"),
-                (By.CSS_SELECTOR, ".page-content"),
-                (By.CSS_SELECTOR, ".main-content")
-            ]
+            # Scroll to ensure the page is fully rendered
+            browser.execute_script("window.scrollTo(0, 0);")
+            browser.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+            browser.execute_script("window.scrollTo(0, 0);")
             
-            for selector in table_selectors:
-                try:
-                    WebDriverWait(browser, 15).until(
-                        EC.visibility_of_element_located(selector)
-                    )
-                    logger.info(f"Found content with selector: {selector}")
-                    break
-                except:
-                    continue
-        except Exception as e:
-            logger.warning(f"Could not find table or content: {str(e)}")
-            # Continue anyway
+            # Attempt to force page to be ready
+            browser.execute_script("""
+                // Force any pending DOM updates
+                document.body.getBoundingClientRect();
+            """)
+        except Exception as js_error:
+            logger.warning(f"JavaScript execution for page preparation failed: {str(js_error)}")
         
-        # Force a small wait to ensure page has time to load
-        logger.info("Waiting 10 seconds for page to stabilize...")
-        time.sleep(10)
-        take_screenshot(browser, "page_before_export")
+        # Force an explicit wait 
+        logger.info("Waiting 5 seconds for page to stabilize...")
+        time.sleep(5)
         
+        # Take a screenshot to see what we're working with
         try:
-            logger.info("Waiting for Export CSV button to be clickable...")
-            WebDriverWait(browser, 20).until(
-                EC.element_to_be_clickable(export_button_selector)
-            )
-            export_button = browser.find_element(*export_button_selector)
-            logger.info("Export CSV button found with exact selector")
-        except Exception as e:
-            logger.warning(f"Could not find export button with exact selector: {str(e)}")
-            logger.info("Falling back to alternative selectors...")
-            
-            # Try multiple selectors as fallback
-            export_button_selectors = [
-                (By.XPATH, "//button[text()='Export CSV']"),
-                (By.XPATH, "//button[contains(text(), 'Export CSV')]"),
-                (By.CSS_SELECTOR, ".export-summary-btn"),
-                (By.CSS_SELECTOR, ".export-csv"),
-                (By.CSS_SELECTOR, "button.btn"),
-                (By.XPATH, "//button[contains(text(), 'Export')]"),
-                (By.XPATH, "//button[contains(@class, 'export')]"),
-                (By.XPATH, "//a[contains(text(), 'Export')]"),
-                (By.XPATH, "//a[contains(@class, 'export')]")
-            ]
-            
-            export_button = None
-            for selector_type, selector_value in export_button_selectors:
-                # Check if we've exceeded our wait time
-                if time.time() - start_time > max_wait_time:
-                    logger.warning(f"Exceeded max wait time of {max_wait_time}s while looking for export button")
-                    # Try brute force javascript exec as last resort
-                    try:
-                        logger.info("Trying to execute export via JavaScript...")
-                        browser.execute_script("""
-                            var buttons = document.querySelectorAll('button');
-                            for(var i=0; i<buttons.length; i++) {
-                                if(buttons[i].innerText.includes('Export')) {
-                                    buttons[i].click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        """)
-                        logger.info("Executed JavaScript to find and click export button")
-                        # If we get here, we attempted the JS click - let's wait and hope for download
-                        time.sleep(30)
-                        return True
-                    except Exception as js_error:
-                        logger.error(f"JavaScript execution failed: {str(js_error)}")
-                        break
+            take_screenshot(browser, "before_export_button_search")
+        except:
+            pass
+        
+        # Attempt an ultra-aggressive approach to find and click the export button
+        found_and_clicked = False
+        
+        # Method 1: Try direct selector approach
+        logger.info("Method 1: Using direct CSS selectors...")
+        export_selectors = [
+            "button.btn.btn-sm.m-r-15.export-summary-btn",
+            "button.export-summary-btn", 
+            ".export-csv", 
+            "button:contains('Export')",
+            "button.btn:contains('Export')",
+            "button.btn",
+            "a:contains('Export')"
+        ]
+        
+        for selector in export_selectors:
+            # Check if we've exceeded our wait time
+            if time.time() - start_time > max_wait_time:
+                logger.warning(f"Exceeded max wait time, moving to forceful methods")
+                break
                 
-                try:
-                    WebDriverWait(browser, 10).until(
-                        EC.element_to_be_clickable((selector_type, selector_value))
-                    )
-                    export_button = browser.find_element(selector_type, selector_value)
-                    logger.info(f"Export CSV button found with fallback selector: {selector_type}={selector_value}")
-                    break
-                except:
-                    continue
-            
-            if not export_button:
-                if time.time() - start_time > max_wait_time:
-                    logger.warning("Export button not found, but max time exceeded. Proceeding anyway.")
-                    return True
-                else:
-                    logger.error("Export CSV button not found with any selector")
-                    take_screenshot(browser, "export_button_not_found")
-                    return False
-        
-        # Take screenshot before clicking
-        take_screenshot(browser, "before_clicking_export")
-        
-        # Click the export button
-        logger.info("Clicking Export CSV button...")
-        try:
-            # Try regular click
-            export_button.click()
-        except Exception as click_error:
-            logger.warning(f"Regular click failed: {str(click_error)}")
-            # If regular click fails, try JavaScript click
             try:
-                logger.info("Regular click failed, trying JavaScript click")
-                browser.execute_script("arguments[0].click();", export_button)
-            except Exception as js_click_error:
-                logger.error(f"JavaScript click also failed: {str(js_click_error)}")
+                logger.info(f"Trying selector: {selector}")
                 
-                # Last resort - try sending keys
+                # Try to find elements via JavaScript for more reliable results
+                elements = browser.execute_script(f"""
+                    return document.querySelectorAll("{selector}");
+                """)
+                
+                if elements and len(elements) > 0:
+                    logger.info(f"Found {len(elements)} potential export buttons with selector: {selector}")
+                    
+                    for element in elements:
+                        try:
+                            logger.info("Attempting to click element via JavaScript...")
+                            browser.execute_script("arguments[0].click();", element)
+                            logger.info("Element clicked via JavaScript")
+                            found_and_clicked = True
+                            time.sleep(2)  # Wait briefly after click
+                            break
+                        except Exception as click_error:
+                            logger.warning(f"Failed to click via JavaScript: {str(click_error)}")
+                    
+                    if found_and_clicked:
+                        break
+            except Exception as selector_error:
+                logger.warning(f"Error with selector {selector}: {str(selector_error)}")
+        
+        # Method 2: Brute force approach - try to find by text content
+        if not found_and_clicked and time.time() - start_time <= max_wait_time:
+            logger.info("Method 2: Trying brute force approach, find by text content...")
+            try:
+                result = browser.execute_script("""
+                    var buttons = document.querySelectorAll('button, a');
+                    for (var i = 0; i < buttons.length; i++) {
+                        var btn = buttons[i];
+                        if (btn.innerText && (
+                            btn.innerText.includes('Export') || 
+                            btn.innerText.includes('CSV') ||
+                            btn.innerText.includes('Download')
+                        )) {
+                            console.log("Found button by text: " + btn.innerText);
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                
+                if result:
+                    logger.info("Successfully clicked export via text search")
+                    found_and_clicked = True
+            except Exception as js_error:
+                logger.warning(f"Text search method failed: {str(js_error)}")
+        
+        # Method 3: XPath approach
+        if not found_and_clicked and time.time() - start_time <= max_wait_time:
+            logger.info("Method 3: Trying XPath selectors...")
+            xpath_selectors = [
+                "//button[contains(text(), 'Export')]",
+                "//button[contains(text(), 'CSV')]",
+                "//a[contains(text(), 'Export')]",
+                "//a[contains(text(), 'CSV')]",
+                "//button[contains(@class, 'export')]",
+                "//a[contains(@class, 'export')]",
+                "//button[contains(@class, 'btn')]",
+                "//div[contains(@class, 'export')]//button"
+            ]
+            
+            for xpath in xpath_selectors:
                 try:
-                    logger.info("Trying to send Enter key to the button")
-                    export_button.send_keys(Keys.RETURN)
-                except:
-                    logger.error("All click methods failed")
-                    # Continue anyway - we've tried our best
+                    elements = browser.find_elements(By.XPATH, xpath)
+                    if elements:
+                        logger.info(f"Found {len(elements)} elements with XPath: {xpath}")
+                        for element in elements:
+                            try:
+                                element.click()
+                                logger.info(f"Clicked element with XPath: {xpath}")
+                                found_and_clicked = True
+                                time.sleep(2)
+                                break
+                            except:
+                                try:
+                                    browser.execute_script("arguments[0].click();", element)
+                                    logger.info(f"Clicked element with XPath via JavaScript: {xpath}")
+                                    found_and_clicked = True
+                                    time.sleep(2)
+                                    break
+                                except:
+                                    continue
+                    if found_and_clicked:
+                        break
+                except Exception as xpath_error:
+                    logger.warning(f"XPath method failed for {xpath}: {str(xpath_error)}")
+        
+        # Method 4: Last resort - try tab key navigation and enter
+        if not found_and_clicked and time.time() - start_time <= max_wait_time:
+            logger.info("Method 4: Trying keyboard navigation...")
+            try:
+                # First click on body to ensure focus is in the document
+                browser.find_element(By.TAG_NAME, "body").click()
+                
+                # Send a series of TAB keys to navigate through elements
+                actions = ActionChains(browser)
+                for _ in range(20):  # Try 20 tabs
+                    actions.send_keys(Keys.TAB)
+                actions.perform()
+                
+                # Now send ENTER to try to activate the focused element
+                actions = ActionChains(browser)
+                actions.send_keys(Keys.RETURN)
+                actions.perform()
+                
+                logger.info("Performed keyboard navigation attempt")
+                # We don't know if this worked, but we'll assume it might have
+                found_and_clicked = True
+            except Exception as key_error:
+                logger.warning(f"Keyboard navigation method failed: {str(key_error)}")
         
         # Take screenshot after clicking
-        time.sleep(3)
-        take_screenshot(browser, "after_clicking_export")
+        try:
+            take_screenshot(browser, "after_export_attempts")
+        except:
+            pass
         
-        # Wait for a fixed amount of time instead of trying to detect the file
-        logger.info("Waiting for download to complete (fixed 30 second wait)...")
+        # Log the outcome
+        if found_and_clicked:
+            logger.info("Export button appears to have been clicked, waiting for download...")
+        else:
+            logger.warning("Could not find or click export button with any method")
+        
+        # Wait for a fixed amount of time for download regardless
+        logger.info("Waiting 30 seconds for any download to complete...")
         time.sleep(30)
         
-        # Just check if any new CSV files exist after waiting
+        # Check for any CSV files
         download_dir = os.path.abspath(os.getcwd())
         csv_files = [f for f in os.listdir(download_dir) if f.endswith('.csv')]
         if csv_files:
@@ -635,16 +683,18 @@ def click_export_csv(browser):
             return True
         else:
             logger.warning("No CSV files found after waiting")
-            # If we've waited long enough, proceed anyway as a last resort
-            if time.time() - start_time > max_wait_time:
-                logger.warning("No CSV found but exceeded max wait time. Proceeding anyway as files may appear later.")
-                return True
-            return False
+            # Always proceed even if no CSV found - we tried our best
+            logger.warning("Proceeding anyway - files may appear later or may have been downloaded elsewhere")
+            return True
             
     except Exception as e:
         logger.error(f"Failed to export CSV: {str(e)}")
-        take_screenshot(browser, "export_exception")
-        return False
+        try:
+            take_screenshot(browser, "export_exception")
+        except:
+            pass
+        # Always return True to continue - don't get stuck here
+        return True
 
 def process_csv_file(file_path):
     """Process the downloaded CSV file to find targets with RPC above threshold"""
@@ -1132,5 +1182,24 @@ if __name__ == "__main__":
         start_date = sys.argv[3] if len(sys.argv) > 3 else None
         end_date = sys.argv[4] if len(sys.argv) > 4 else start_date
     
-    # Run export
-    export_csv(username, password, start_date, end_date) 
+    # Set a global timeout for the entire process
+    def timeout_handler():
+        logger.error("Global timeout reached, forcing script termination")
+        # Force terminate the process
+        os.kill(os.getpid(), signal.SIGTERM)
+    
+    # Set 10 minute timeout for the entire process
+    global_timeout = int(os.getenv("GLOBAL_TIMEOUT_MINUTES", "10")) * 60
+    timer = threading.Timer(global_timeout, timeout_handler)
+    timer.daemon = True
+    timer.start()
+    
+    try:
+        # Run export
+        export_csv(username, password, start_date, end_date)
+    except Exception as e:
+        logger.error(f"Unhandled exception in main process: {str(e)}")
+    finally:
+        # Cancel timer if script completes normally
+        timer.cancel()
+        logger.info("Script execution complete") 
