@@ -1,0 +1,28 @@
+services:
+  - type: worker
+    name: ringba-csv-exporter
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/simple_export.py
+    plan: starter
+    branch: main
+    numInstances: 1
+    autoDeploy: true
+    envVars:
+      - key: RINGBA_USERNAME
+        sync: false
+      - key: RINGBA_PASSWORD
+        sync: false
+      - key: RPC_THRESHOLD
+        value: 10.0
+      - key: USE_HEADLESS
+        value: true
+      - key: PYTHONUNBUFFERED
+        value: true
+      - key: MORNING_CHECK_TIME
+        value: 10:00
+      - key: AFTERNOON_CHECK_TIME
+        value: 15:00
+      - key: TZ
+        value: America/New_York
+    cron: "0 10,15 * * * America/New_York" # Runs at 10 AM and 3 PM EST every day 
