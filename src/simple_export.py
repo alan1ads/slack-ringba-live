@@ -805,14 +805,9 @@ def send_results_to_slack(targets_df, target_col, rpc_col, run_label=''):
         if not high_rpc_targets.empty:
             target_list = ""
             for _, row in high_rpc_targets.iterrows():
-                target_name = row[target_col]
-                rpc_value = row[rpc_col]
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 
-                # Handle NaN values in target name
-                if pd.isna(target_name):
-                    target_name = "Unnamed Target"
-                
-                target_list += f"• *{target_name}*: RPC = {rpc_value:.2f}\n"
+                target_list += f"• *{target_name}*: RPC = {row[rpc_col]:.2f}\n"
             
             message["blocks"].append({
                 "type": "section",
@@ -1072,7 +1067,7 @@ def send_midday_comparison_to_slack(targets_df, went_below_df, target_col, rpc_c
         if not went_below_df.empty:
             below_list = "*Targets that FELL BELOW ${:.2f} RPC since morning:* 📉\n".format(rpc_threshold)
             for _, row in went_below_df.iterrows():
-                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 morning_rpc = row[morning_rpc_col]
                 midday_rpc = row[rpc_col]
                 change = midday_rpc - morning_rpc
@@ -1105,7 +1100,7 @@ def send_midday_comparison_to_slack(targets_df, went_below_df, target_col, rpc_c
         if not targets_df.empty:
             current_list = f"*Current Targets Above ${rpc_threshold:.2f} RPC:* 📊\n"
             for _, row in targets_df.iterrows():
-                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 rpc_value = row[rpc_col]
                 current_list += f"• *{target_name}*: RPC = {rpc_value:.2f}\n"
             
@@ -1310,7 +1305,7 @@ def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_n
         if not went_below_df.empty:
             below_list = f"*Targets that FELL BELOW ${rpc_threshold:.2f} RPC since {previous_run_name} run:* 📉\n"
             for _, row in went_below_df.iterrows():
-                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 previous_rpc = row[previous_rpc_col]
                 afternoon_rpc = row[rpc_col]
                 change = afternoon_rpc - previous_rpc
@@ -1343,7 +1338,7 @@ def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_n
         if not targets_df.empty:
             current_list = f"*Current Targets Above ${rpc_threshold:.2f} RPC:* 📊\n"
             for _, row in targets_df.iterrows():
-                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 rpc_value = row[rpc_col]
                 current_list += f"• *{target_name}*: RPC = {rpc_value:.2f}\n"
             
@@ -1416,7 +1411,7 @@ def export_csv(username=None, password=None, start_date=None, end_date=None):
     # Get the configured times for different runs
     morning_time_str = os.getenv('MORNING_CHECK_TIME', '11:00')
     afternoon_time_str = os.getenv('AFTERNOON_CHECK_TIME', '16:30')
-    midday_time_str = '14:00'  # Fixed to 2:00 PM
+    midday_time_str = os.getenv('MIDDAY_CHECK_TIME', '14:00')
     
     # Determine run type based on RUN_LABEL
     is_morning_run = False
