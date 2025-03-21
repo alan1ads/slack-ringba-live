@@ -25,6 +25,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import threading
 import signal
+import pickle
 
 # Load environment variables
 load_dotenv()
@@ -725,7 +726,7 @@ def process_csv_file(file_path):
         logger.info(f"Using columns: RPC={rpc_col}, Target/Campaign={target_col}")
         
         # Get threshold from environment variable or use default
-        rpc_threshold = float(os.getenv('RPC_THRESHOLD', 10.0))
+        rpc_threshold = float(os.getenv('RPC_THRESHOLD', 12.0))
         logger.info(f"Using RPC threshold: {rpc_threshold}")
         
         # Ensure RPC column is numeric
@@ -751,288 +752,644 @@ def process_csv_file(file_path):
         logger.error(f"Error processing CSV file: {str(e)}")
         return None
 
-def send_results_to_slack(targets_df, target_col, rpc_col):
+def send_results_to_slack(targets_df, target_col, rpc_col, run_label=''):
     """Send the processing results to Slack webhook"""
     import requests
-    import json
-    
-    slack_webhook_url = os.getenv('SLACK_WEBHOOK_URL')
-    if not slack_webhook_url:
-        logger.warning("No Slack webhook URL provided, skipping notification")
-        return False
     
     try:
-        logger.info("Sending results to Slack")
+        webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+        if not webhook_url:
+            logger.error("Slack webhook URL not configured, skipping notification")
+            return False
         
-        # Format the results
-        if len(targets_df) == 0:
-            message = {"text": "📊 *Ringba Target Report*\n\nNo targets meeting the RPC threshold were found."}
+        # Get RPC threshold from environment
+        rpc_threshold = float(os.getenv('RPC_THRESHOLD', '12.0'))
+        
+        # Format the date for display
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Get targets meeting the RPC threshold
+        high_rpc_targets = targets_df[targets_df[rpc_col] >= rpc_threshold]
+        target_count = len(high_rpc_targets)
+        
+        # Format run time based on label or current time
+        if run_label:
+            run_time_label = f"*{run_label.upper()} RUN*"
         else:
-            # Replace 'nan' with 'Total RPC (including the ones below $10)'
-            targets_df = targets_df.copy()
-            if target_col in targets_df.columns:
-                targets_df[target_col] = targets_df[target_col].fillna("Total RPC (including the ones below $10)")
-            
-            # Get threshold from environment variable or use default
-            rpc_threshold = float(os.getenv('RPC_THRESHOLD', 10.0))
-            
-            # Create a more readable message
-            message_parts = []
-            message_parts.append(f"📊 *Ringba Target Report* - Showing Targets with RPC ≥ ${rpc_threshold:.2f}")
-            message_parts.append("")
-            message_parts.append("```")
-            
-            # Use a more compact format to fit more data
-            # First determine the max length of target names for proper formatting
-            max_target_len = targets_df[target_col].astype(str).map(len).max()
-            max_target_len = max(max_target_len, 15)  # At least 15 chars
-            
-            # Create the header
-            message_parts.append(f"{'Target/Campaign':<{max_target_len}} | {'RPC':>8}")
-            message_parts.append("-" * (max_target_len + 12))
-            
-            # Add each row
-            for index, row in targets_df.iterrows():
-                target = str(row[target_col])
-                message_parts.append(
-                    f"{target:<{max_target_len}} | {row[rpc_col]:>8.2f}"
-                )
-            
-            message_parts.append("```")
-            
-            message = {
-                "text": "\n".join(message_parts)
-            }
+            # Use current time if no label
+            current_time = datetime.now().strftime('%I:%M %p')
+            run_time_label = f"*{current_time}*"
         
-        # Send to Slack
+        # Create the message
+        message = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"Ringba RPC Report - {today} {run_time_label}",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"Found *{target_count}* targets with RPC >= {rpc_threshold}"
+                    }
+                }
+            ]
+        }
+        
+        # Add targets to message
+        if not high_rpc_targets.empty:
+            target_list = ""
+            for _, row in high_rpc_targets.iterrows():
+                target_name = row[target_col]
+                rpc_value = row[rpc_col]
+                
+                # Handle NaN values in target name
+                if pd.isna(target_name):
+                    target_name = "Unnamed Target"
+                
+                target_list += f"• *{target_name}*: RPC = {rpc_value:.2f}\n"
+            
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": target_list
+                }
+            })
+        else:
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "No targets meeting RPC threshold."
+                }
+            })
+        
+        # Add footer
+        message["blocks"].append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Data from Ringba for {today}"
+                }
+            ]
+        })
+        
+        # Send the message
         response = requests.post(
-            slack_webhook_url,
-            data=json.dumps(message),
-            headers={"Content-Type": "application/json"}
+            webhook_url,
+            json=message,
+            headers={'Content-Type': 'application/json'}
         )
         
         if response.status_code == 200:
             logger.info("Results sent to Slack successfully")
             return True
         else:
-            logger.error(f"Failed to send to Slack. Status code: {response.status_code}, Response: {response.text}")
+            logger.error(f"Failed to send results to Slack: {response.status_code} {response.text}")
             return False
+            
     except Exception as e:
-        logger.error(f"Error sending to Slack: {str(e)}")
+        logger.error(f"Error sending results to Slack: {str(e)}")
         return False
 
 def save_morning_results(targets_df, target_col, rpc_col):
-    """Save the morning results for comparison with afternoon run"""
+    """Save morning results for comparison with afternoon run"""
     try:
-        # Create a directory for storing comparison data if it doesn't exist
-        data_dir = "data"
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
+        # Create a copy to avoid any reference issues
+        df_copy = targets_df.copy()
         
-        # Get today's date for the filename
-        today = datetime.now().strftime('%Y-%m-%d')
-        morning_file = os.path.join(data_dir, f"morning_results_{today}.csv")
+        # Create a dictionary with all the data we need
+        morning_data = {
+            'targets_df': df_copy,
+            'target_col': target_col,
+            'rpc_col': rpc_col,
+            'timestamp': datetime.now().isoformat()
+        }
         
-        # Save the dataframe with only target and RPC columns
-        save_df = targets_df[[target_col, rpc_col]].copy()
-        save_df.to_csv(morning_file, index=False)
+        # Save as pickle for complete data preservation
+        with open('morning_results.pkl', 'wb') as f:
+            pickle.dump(morning_data, f)
         
-        logger.info(f"Morning results saved to {morning_file}")
+        logger.info("Morning results saved successfully")
         return True
     except Exception as e:
-        logger.error(f"Error saving morning results: {str(e)}")
+        logger.error(f"Failed to save morning results: {str(e)}")
         return False
 
 def load_morning_results():
-    """Load the morning results for comparison with afternoon run"""
+    """Load morning results for afternoon comparison"""
     try:
-        # Get today's date for the filename
-        data_dir = "data"
-        today = datetime.now().strftime('%Y-%m-%d')
-        morning_file = os.path.join(data_dir, f"morning_results_{today}.csv")
-        
-        if not os.path.exists(morning_file):
-            logger.warning(f"Morning results file not found: {morning_file}")
+        # Check if the file exists
+        if not os.path.exists('morning_results.pkl'):
+            logger.warning("Morning results file does not exist")
             return None
         
-        # Load the dataframe
-        morning_df = pd.read_csv(morning_file)
-        logger.info(f"Loaded morning results from {morning_file} with {len(morning_df)} rows")
+        # Load the saved data
+        with open('morning_results.pkl', 'rb') as f:
+            morning_data = pickle.load(f)
         
-        return morning_df
+        # Verify the data has the expected structure
+        required_keys = ['targets_df', 'target_col', 'rpc_col']
+        if not all(key in morning_data for key in required_keys):
+            logger.warning("Morning results file has invalid format")
+            return None
+        
+        # Check if the data is from today
+        timestamp = datetime.fromisoformat(morning_data['timestamp'])
+        today = datetime.now().date()
+        
+        if timestamp.date() != today:
+            logger.warning(f"Morning results are from {timestamp.date()}, not from today ({today})")
+            return None
+        
+        logger.info("Morning results loaded successfully")
+        return morning_data
     except Exception as e:
-        logger.error(f"Error loading morning results: {str(e)}")
+        logger.error(f"Failed to load morning results: {str(e)}")
         return None
 
-def compare_and_send_afternoon_results(targets_df, target_col, rpc_col):
-    """Compare afternoon results with morning and send notification"""
+def save_midday_results(targets_df, target_col, rpc_col):
+    """Save midday results for comparison with afternoon run"""
     try:
-        # Load morning results
-        morning_df = load_morning_results()
+        # Create a copy to avoid any reference issues
+        df_copy = targets_df.copy()
         
-        if morning_df is None:
-            logger.warning("No morning results available for comparison")
-            # Just send regular results without comparison
-            return send_results_to_slack(targets_df, target_col, rpc_col)
-        
-        # Get threshold from environment variable or use default
-        rpc_threshold = float(os.getenv('RPC_THRESHOLD', 10.0))
-        
-        # Merge the dataframes to compare
-        # Use suffixes to identify morning vs afternoon values
-        merged_df = pd.merge(
-            morning_df, 
-            targets_df, 
-            on=target_col, 
-            how='outer',
-            suffixes=('_morning', '_afternoon')
-        )
-        
-        # Fill NaN with 0 for any missing values (targets that weren't in one of the datasets)
-        morning_rpc_col = f"{rpc_col}_morning"
-        afternoon_rpc_col = f"{rpc_col}_afternoon"
-        
-        # Replace NaN with 0 for calculation purposes
-        merged_df[morning_rpc_col] = merged_df[morning_rpc_col].fillna(0)
-        merged_df[afternoon_rpc_col] = merged_df[afternoon_rpc_col].fillna(0)
-        
-        # Find which targets crossed the threshold
-        # 1. Targets that went below threshold (were >= threshold in morning, now < threshold)
-        went_below = merged_df[
-            (merged_df[morning_rpc_col] >= rpc_threshold) & 
-            (merged_df[afternoon_rpc_col] < rpc_threshold)
-        ]
-        
-        # 2. Targets that went above threshold (were < threshold in morning, now >= threshold)
-        went_above = merged_df[
-            (merged_df[morning_rpc_col] < rpc_threshold) & 
-            (merged_df[afternoon_rpc_col] >= rpc_threshold)
-        ]
-        
-        # Send to Slack with comparison information
-        send_afternoon_comparison_to_slack(
-            targets_df, 
-            went_below, 
-            went_above, 
-            target_col, 
-            rpc_col, 
-            morning_rpc_col, 
-            afternoon_rpc_col
-        )
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error comparing results: {str(e)}")
-        # Fall back to sending regular results
-        return send_results_to_slack(targets_df, target_col, rpc_col)
-
-def send_afternoon_comparison_to_slack(targets_df, went_below_df, went_above_df, target_col, rpc_col, morning_rpc_col, afternoon_rpc_col):
-    """Send afternoon comparison results to Slack"""
-    import requests
-    import json
-    
-    slack_webhook_url = os.getenv('SLACK_WEBHOOK_URL')
-    if not slack_webhook_url:
-        logger.warning("No Slack webhook URL provided, skipping notification")
-        return False
-    
-    try:
-        logger.info("Sending afternoon comparison to Slack")
-        
-        # Get threshold
-        rpc_threshold = float(os.getenv('RPC_THRESHOLD', 10.0))
-        
-        # Replace 'nan' with 'Total RPC (including the ones below $10)'
-        targets_df = targets_df.copy()
-        if target_col in targets_df.columns:
-            targets_df[target_col] = targets_df[target_col].fillna("Total RPC (including the ones below $10)")
-        
-        # First determine the max length of target names for proper formatting
-        max_target_len = targets_df[target_col].astype(str).map(len).max()
-        max_target_len = max(max_target_len, 15)  # At least 15 chars
-        
-        # Create a more detailed afternoon message
-        message_parts = []
-        
-        # Main header
-        message_parts.append(f"📊 *Afternoon Ringba Target Report* - Showing Targets with RPC ≥ ${rpc_threshold:.2f}")
-        message_parts.append("")
-        
-        # Current targets above threshold
-        message_parts.append("*Current Targets Above Threshold:*")
-        message_parts.append("```")
-        message_parts.append(f"{'Target/Campaign':<{max_target_len}} | {'RPC':>8}")
-        message_parts.append("-" * (max_target_len + 12))
-        
-        for index, row in targets_df.iterrows():
-            target = str(row[target_col])
-            message_parts.append(
-                f"{target:<{max_target_len}} | {row[rpc_col]:>8.2f}"
-            )
-        
-        message_parts.append("```")
-        
-        # Show targets that went below threshold since morning
-        if not went_below_df.empty:
-            message_parts.append("*🔻 Targets That Went BELOW Threshold Since Morning:*")
-            message_parts.append("```")
-            message_parts.append(f"{'Target/Campaign':<{max_target_len}} | {'Morning':>8} | {'Afternoon':>8} | {'Change':>8}")
-            message_parts.append("-" * (max_target_len + 37))
-            
-            for index, row in went_below_df.iterrows():
-                target = str(row[target_col])
-                if pd.isna(target):
-                    target = "Total RPC (including the ones below $10)"
-                morning = row[morning_rpc_col]
-                afternoon = row[afternoon_rpc_col]
-                change = afternoon - morning
-                
-                message_parts.append(
-                    f"{target:<{max_target_len}} | {morning:>8.2f} | {afternoon:>8.2f} | {change:>+8.2f}"
-                )
-            
-            message_parts.append("```")
-        
-        # Show targets that went above threshold since morning
-        if not went_above_df.empty:
-            message_parts.append("*🔺 Targets That Went ABOVE Threshold Since Morning:*")
-            message_parts.append("```")
-            message_parts.append(f"{'Target/Campaign':<{max_target_len}} | {'Morning':>8} | {'Afternoon':>8} | {'Change':>8}")
-            message_parts.append("-" * (max_target_len + 37))
-            
-            for index, row in went_above_df.iterrows():
-                target = str(row[target_col])
-                if pd.isna(target):
-                    target = "Total RPC (including the ones below $10)"
-                morning = row[morning_rpc_col]
-                afternoon = row[afternoon_rpc_col]
-                change = afternoon - morning
-                
-                message_parts.append(
-                    f"{target:<{max_target_len}} | {morning:>8.2f} | {afternoon:>8.2f} | {change:>+8.2f}"
-                )
-            
-            message_parts.append("```")
-        
-        # Send the message
-        message = {
-            "text": "\n".join(message_parts)
+        # Create a dictionary with all the data we need
+        midday_data = {
+            'targets_df': df_copy,
+            'target_col': target_col,
+            'rpc_col': rpc_col,
+            'timestamp': datetime.now().isoformat()
         }
         
+        # Save as pickle for complete data preservation
+        with open('midday_results.pkl', 'wb') as f:
+            pickle.dump(midday_data, f)
+        
+        logger.info("Midday results saved successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save midday results: {str(e)}")
+        return False
+
+def load_midday_results():
+    """Load midday results for afternoon comparison"""
+    try:
+        # Check if the file exists
+        if not os.path.exists('midday_results.pkl'):
+            logger.warning("Midday results file does not exist")
+            return None
+        
+        # Load the saved data
+        with open('midday_results.pkl', 'rb') as f:
+            midday_data = pickle.load(f)
+        
+        # Verify the data has the expected structure
+        required_keys = ['targets_df', 'target_col', 'rpc_col']
+        if not all(key in midday_data for key in required_keys):
+            logger.warning("Midday results file has invalid format")
+            return None
+        
+        # Check if the data is from today
+        timestamp = datetime.fromisoformat(midday_data['timestamp'])
+        today = datetime.now().date()
+        
+        if timestamp.date() != today:
+            logger.warning(f"Midday results are from {timestamp.date()}, not from today ({today})")
+            return None
+        
+        logger.info("Midday results loaded successfully")
+        return midday_data
+    except Exception as e:
+        logger.error(f"Failed to load midday results: {str(e)}")
+        return None
+
+def compare_and_send_midday_results(targets_df, target_col, rpc_col):
+    """Compare midday results with morning run and send notification"""
+    try:
+        # Try to load morning results
+        morning_data = load_morning_results()
+        
+        if not morning_data:
+            logger.warning("No morning results available for comparison")
+            # Just send regular results without comparison
+            return send_results_to_slack(targets_df, target_col, rpc_col, run_label='midday')
+        
+        # Get threshold from environment variable or use default
+        rpc_threshold = float(os.getenv('RPC_THRESHOLD', 12.0))
+        
+        # Get the morning data components
+        morning_df = morning_data['targets_df']
+        morning_target_col = morning_data['target_col']
+        morning_rpc_col = morning_data['rpc_col']
+        
+        # Make sure both DataFrames have the same columns
+        if not target_col in targets_df.columns or not rpc_col in targets_df.columns:
+            logger.error(f"Current data missing required columns: {target_col}, {rpc_col}")
+            return send_results_to_slack(targets_df, target_col, rpc_col, run_label='midday')
+        
+        if not morning_target_col in morning_df.columns or not morning_rpc_col in morning_df.columns:
+            logger.error(f"Morning data missing required columns: {morning_target_col}, {morning_rpc_col}")
+            return send_results_to_slack(targets_df, target_col, rpc_col, run_label='midday')
+        
+        # Rename columns to avoid confusion
+        targets_df = targets_df.rename(columns={rpc_col: 'midday_rpc'})
+        morning_df = morning_df.rename(columns={morning_rpc_col: 'morning_rpc'})
+        
+        # Merge the dataframes on target column
+        merged_df = pd.merge(morning_df, targets_df, how='outer', left_on=morning_target_col, right_on=target_col)
+        
+        # Fill NaN values
+        merged_df['morning_rpc'] = merged_df['morning_rpc'].fillna(0)
+        merged_df['midday_rpc'] = merged_df['midday_rpc'].fillna(0)
+        
+        # Use original target column if available, otherwise morning target column
+        merged_df[target_col] = merged_df[target_col].fillna(merged_df[morning_target_col])
+        
+        # Find targets that went below the threshold since morning
+        went_below_threshold = merged_df[
+            (merged_df['morning_rpc'] >= rpc_threshold) & 
+            (merged_df['midday_rpc'] < rpc_threshold)
+        ]
+        
+        # Current targets above threshold in midday run
+        current_above_threshold = merged_df[merged_df['midday_rpc'] >= rpc_threshold]
+        
+        # Save midday results for afternoon comparison
+        save_midday_results(targets_df, target_col, 'midday_rpc')
+        
+        # Send midday results with comparison
+        return send_midday_comparison_to_slack(
+            targets_df=current_above_threshold, 
+            went_below_df=went_below_threshold, 
+            target_col=target_col, 
+            rpc_col='midday_rpc', 
+            morning_rpc_col='morning_rpc'
+        )
+    except Exception as e:
+        logger.error(f"Error comparing midday results: {str(e)}")
+        # Fall back to sending regular results
+        return send_results_to_slack(targets_df, target_col, rpc_col, run_label='midday')
+
+def send_midday_comparison_to_slack(targets_df, went_below_df, target_col, rpc_col, morning_rpc_col):
+    """Send midday comparison results to Slack"""
+    import requests
+    
+    try:
+        webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+        if not webhook_url:
+            logger.error("Slack webhook URL not configured, skipping notification")
+            return False
+        
+        # Get RPC threshold for context
+        rpc_threshold = float(os.getenv('RPC_THRESHOLD', '12.0'))
+        
+        # Format the date for display
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Create the message with comparison
+        message = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"Ringba RPC Report - {today} *MIDDAY RUN (2 PM ET)*",
+                        "emoji": True
+                    }
+                }
+            ]
+        }
+        
+        # Targets that fell below threshold since morning
+        if not went_below_df.empty:
+            below_list = "*Targets that FELL BELOW ${:.2f} RPC since morning:* 📉\n".format(rpc_threshold)
+            for _, row in went_below_df.iterrows():
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                morning_rpc = row[morning_rpc_col]
+                midday_rpc = row[rpc_col]
+                change = midday_rpc - morning_rpc
+                change_pct = (change / morning_rpc) * 100 if morning_rpc > 0 else 0
+                
+                below_list += f"• *{target_name}*: {morning_rpc:.2f} → {midday_rpc:.2f} ({change_pct:.1f}%)\n"
+            
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": below_list
+                }
+            })
+        else:
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*No targets fell below threshold since morning*"
+                }
+            })
+        
+        # Add a divider to separate the sections
+        message["blocks"].append({
+            "type": "divider"
+        })
+        
+        # Current targets above threshold
+        if not targets_df.empty:
+            current_list = f"*Current Targets Above ${rpc_threshold:.2f} RPC:* 📊\n"
+            for _, row in targets_df.iterrows():
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                rpc_value = row[rpc_col]
+                current_list += f"• *{target_name}*: RPC = {rpc_value:.2f}\n"
+            
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": current_list
+                }
+            })
+        else:
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*No targets currently above ${rpc_threshold:.2f} RPC*"
+                }
+            })
+        
+        # Add footer
+        message["blocks"].append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Data from Ringba for {today}"
+                }
+            ]
+        })
+        
+        # Send the message
         response = requests.post(
-            slack_webhook_url,
-            data=json.dumps(message),
-            headers={"Content-Type": "application/json"}
+            webhook_url,
+            json=message,
+            headers={'Content-Type': 'application/json'}
         )
         
         if response.status_code == 200:
-            logger.info("Afternoon comparison sent to Slack successfully")
+            logger.info("Midday comparison results sent to Slack successfully")
             return True
         else:
-            logger.error(f"Failed to send to Slack. Status code: {response.status_code}, Response: {response.text}")
+            logger.error(f"Failed to send midday comparison results to Slack: {response.status_code} {response.text}")
             return False
+            
     except Exception as e:
-        logger.error(f"Error sending afternoon comparison to Slack: {str(e)}")
+        logger.error(f"Error sending midday comparison results to Slack: {str(e)}")
+        return False
+
+def compare_and_send_afternoon_results(targets_df, target_col, rpc_col, run_label='afternoon'):
+    """Compare afternoon results with midday run and send notification"""
+    try:
+        # First try to load midday results - this is the priority for afternoon comparison
+        midday_data = load_midday_results()
+        
+        if midday_data:
+            logger.info("Using midday results for afternoon comparison")
+            
+            # Get threshold from environment variable or use default
+            rpc_threshold = float(os.getenv('RPC_THRESHOLD', 12.0))
+            
+            # Get the midday data components
+            midday_df = midday_data['targets_df']
+            midday_target_col = midday_data['target_col']
+            midday_rpc_col = midday_data['rpc_col']
+            
+            # Make sure both DataFrames have the same columns
+            if not target_col in targets_df.columns or not rpc_col in targets_df.columns:
+                logger.error(f"Current data missing required columns: {target_col}, {rpc_col}")
+                return send_results_to_slack(targets_df, target_col, rpc_col, run_label=run_label)
+            
+            if not midday_target_col in midday_df.columns or not midday_rpc_col in midday_df.columns:
+                logger.error(f"Midday data missing required columns: {midday_target_col}, {midday_rpc_col}")
+                return send_results_to_slack(targets_df, target_col, rpc_col, run_label=run_label)
+            
+            # Rename columns to avoid confusion
+            targets_df = targets_df.rename(columns={rpc_col: 'afternoon_rpc'})
+            midday_df = midday_df.rename(columns={midday_rpc_col: 'midday_rpc'})
+            
+            # Merge the dataframes on target column
+            merged_df = pd.merge(midday_df, targets_df, how='outer', left_on=midday_target_col, right_on=target_col)
+            
+            # Fill NaN values
+            merged_df['midday_rpc'] = merged_df['midday_rpc'].fillna(0)
+            merged_df['afternoon_rpc'] = merged_df['afternoon_rpc'].fillna(0)
+            
+            # Use original target column if available, otherwise midday target column
+            merged_df[target_col] = merged_df[target_col].fillna(merged_df[midday_target_col])
+            
+            # Find targets that went below the threshold since midday
+            went_below_threshold = merged_df[
+                (merged_df['midday_rpc'] >= rpc_threshold) & 
+                (merged_df['afternoon_rpc'] < rpc_threshold)
+            ]
+            
+            # Current targets above threshold in afternoon run
+            current_above_threshold = merged_df[merged_df['afternoon_rpc'] >= rpc_threshold]
+            
+            # Send afternoon results with comparison to midday
+            return send_afternoon_comparison_to_slack(
+                targets_df=current_above_threshold, 
+                went_below_df=went_below_threshold, 
+                previous_run_name="midday",
+                target_col=target_col, 
+                rpc_col='afternoon_rpc', 
+                previous_rpc_col='midday_rpc'
+            )
+        
+        # If no midday results, fall back to morning comparison
+        logger.warning("No midday results available, falling back to morning comparison")
+        morning_data = load_morning_results()
+        
+        if not morning_data:
+            logger.warning("No morning results available for comparison either")
+            # Just send regular results without comparison
+            return send_results_to_slack(targets_df, target_col, rpc_col, run_label=run_label)
+        
+        # Get threshold from environment variable or use default
+        rpc_threshold = float(os.getenv('RPC_THRESHOLD', 12.0))
+        
+        # Get the morning data components
+        morning_df = morning_data['targets_df']
+        morning_target_col = morning_data['target_col']
+        morning_rpc_col = morning_data['rpc_col']
+        
+        # Make sure both DataFrames have the same columns
+        if not target_col in targets_df.columns or not rpc_col in targets_df.columns:
+            logger.error(f"Current data missing required columns: {target_col}, {rpc_col}")
+            return send_results_to_slack(targets_df, target_col, rpc_col, run_label=run_label)
+        
+        if not morning_target_col in morning_df.columns or not morning_rpc_col in morning_df.columns:
+            logger.error(f"Morning data missing required columns: {morning_target_col}, {morning_rpc_col}")
+            return send_results_to_slack(targets_df, target_col, rpc_col, run_label=run_label)
+        
+        # Rename columns to avoid confusion
+        targets_df = targets_df.rename(columns={rpc_col: 'afternoon_rpc'})
+        morning_df = morning_df.rename(columns={morning_rpc_col: 'morning_rpc'})
+        
+        # Merge the dataframes on target column
+        merged_df = pd.merge(morning_df, targets_df, how='outer', left_on=morning_target_col, right_on=target_col)
+        
+        # Fill NaN values
+        merged_df['morning_rpc'] = merged_df['morning_rpc'].fillna(0)
+        merged_df['afternoon_rpc'] = merged_df['afternoon_rpc'].fillna(0)
+        
+        # Use original target column if available, otherwise morning target column
+        merged_df[target_col] = merged_df[target_col].fillna(merged_df[morning_target_col])
+        
+        # Find targets that went below the threshold since morning
+        went_below_threshold = merged_df[
+            (merged_df['morning_rpc'] >= rpc_threshold) & 
+            (merged_df['afternoon_rpc'] < rpc_threshold)
+        ]
+        
+        # Current targets above threshold in afternoon run
+        current_above_threshold = merged_df[merged_df['afternoon_rpc'] >= rpc_threshold]
+        
+        # Send afternoon results with comparison to morning
+        return send_afternoon_comparison_to_slack(
+            targets_df=current_above_threshold, 
+            went_below_df=went_below_threshold, 
+            previous_run_name="morning",
+            target_col=target_col, 
+            rpc_col='afternoon_rpc', 
+            previous_rpc_col='morning_rpc'
+        )
+    except Exception as e:
+        logger.error(f"Error comparing afternoon results: {str(e)}")
+        # Fall back to sending regular results
+        return send_results_to_slack(targets_df, target_col, rpc_col, run_label=run_label)
+
+def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_name, target_col, rpc_col, previous_rpc_col):
+    """Send afternoon comparison results to Slack"""
+    import requests
+    
+    try:
+        webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+        if not webhook_url:
+            logger.error("Slack webhook URL not configured, skipping notification")
+            return False
+        
+        # Get RPC threshold for context
+        rpc_threshold = float(os.getenv('RPC_THRESHOLD', '12.0'))
+        
+        # Format the date for display
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Create the message with comparison
+        message = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"Ringba RPC Report - {today} *AFTERNOON RUN (4:30 PM ET)*",
+                        "emoji": True
+                    }
+                }
+            ]
+        }
+        
+        # Targets that fell below threshold since previous run
+        if not went_below_df.empty:
+            below_list = f"*Targets that FELL BELOW ${rpc_threshold:.2f} RPC since {previous_run_name} run:* 📉\n"
+            for _, row in went_below_df.iterrows():
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                previous_rpc = row[previous_rpc_col]
+                afternoon_rpc = row[rpc_col]
+                change = afternoon_rpc - previous_rpc
+                change_pct = (change / previous_rpc) * 100 if previous_rpc > 0 else 0
+                
+                below_list += f"• *{target_name}*: {previous_rpc:.2f} → {afternoon_rpc:.2f} ({change_pct:.1f}%)\n"
+            
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": below_list
+                }
+            })
+        else:
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*No targets fell below threshold since {previous_run_name} run*"
+                }
+            })
+        
+        # Add a divider to separate the sections
+        message["blocks"].append({
+            "type": "divider"
+        })
+        
+        # Current targets above threshold
+        if not targets_df.empty:
+            current_list = f"*Current Targets Above ${rpc_threshold:.2f} RPC:* 📊\n"
+            for _, row in targets_df.iterrows():
+                target_name = row[target_col] if not pd.isna(row[target_col]) else "Unnamed Target"
+                rpc_value = row[rpc_col]
+                current_list += f"• *{target_name}*: RPC = {rpc_value:.2f}\n"
+            
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": current_list
+                }
+            })
+        else:
+            message["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*No targets currently above ${rpc_threshold:.2f} RPC*"
+                }
+            })
+        
+        # Add footer
+        message["blocks"].append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Data from Ringba for {today}"
+                }
+            ]
+        })
+        
+        # Send the message
+        response = requests.post(
+            webhook_url,
+            json=message,
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        if response.status_code == 200:
+            logger.info("Afternoon comparison results sent to Slack successfully")
+            return True
+        else:
+            logger.error(f"Failed to send afternoon comparison results to Slack: {response.status_code} {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error sending afternoon comparison results to Slack: {str(e)}")
         return False
 
 def export_csv(username=None, password=None, start_date=None, end_date=None):
@@ -1048,47 +1405,36 @@ def export_csv(username=None, password=None, start_date=None, end_date=None):
     
     logger.info(f"Starting CSV export for period {start_date} to {end_date}")
     
-    # Determine if this is a morning or afternoon run based on current time in EST
+    # Get the run label from environment variable, default to checking time if not set
+    run_label = os.getenv('RUN_LABEL', '').lower()
+    
+    # Determine run time based on current time in EST
     eastern = pytz.timezone('US/Eastern')
     current_time_est = datetime.now(pytz.utc).astimezone(eastern)
     logger.info(f"Current time in EST: {current_time_est.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
-    # Get the configured times for morning and afternoon runs
-    morning_time_str = os.getenv('MORNING_CHECK_TIME', '10:00')
-    afternoon_time_str = os.getenv('AFTERNOON_CHECK_TIME', '15:00')
+    # Get the configured times for different runs
+    morning_time_str = os.getenv('MORNING_CHECK_TIME', '11:00')
+    afternoon_time_str = os.getenv('AFTERNOON_CHECK_TIME', '16:30')
+    midday_time_str = '14:00'  # Fixed to 2:00 PM
     
-    # Parse the time strings
-    morning_hour, morning_minute = map(int, morning_time_str.split(':'))
-    afternoon_hour, afternoon_minute = map(int, afternoon_time_str.split(':'))
+    # Determine run type based on RUN_LABEL
+    is_morning_run = False
+    is_midday_run = False
+    is_afternoon_run = False
     
-    # Create datetime objects for morning and afternoon runs
-    morning_time = current_time_est.replace(
-        hour=morning_hour, 
-        minute=morning_minute, 
-        second=0, 
-        microsecond=0
-    )
-    
-    afternoon_time = current_time_est.replace(
-        hour=afternoon_hour, 
-        minute=afternoon_minute, 
-        second=0, 
-        microsecond=0
-    )
-    
-    # Determine if this is a morning or afternoon run
-    # Allow for some flexibility (runs within 2 hours of scheduled time)
-    time_window = timedelta(hours=2)
-    
-    is_morning_run = abs(current_time_est - morning_time) < time_window
-    is_afternoon_run = abs(current_time_est - afternoon_time) < time_window
-    
-    if is_morning_run:
-        logger.info(f"This is a morning run (scheduled for {morning_time_str} EST)")
-    elif is_afternoon_run:
-        logger.info(f"This is an afternoon run (scheduled for {afternoon_time_str} EST)")
+    if run_label == 'morning':
+        is_morning_run = True
+        logger.info(f"This is a morning run (based on RUN_LABEL={run_label})")
+    elif run_label == 'midday':
+        is_midday_run = True
+        logger.info(f"This is a midday run (based on RUN_LABEL={run_label})")
+    elif run_label == 'afternoon':
+        is_afternoon_run = True
+        logger.info(f"This is an afternoon run (based on RUN_LABEL={run_label})")
     else:
-        logger.info("This is neither a morning nor afternoon scheduled run")
+        # If no label, use default behavior
+        logger.info("No run label specified, using default behavior")
     
     browser = setup_browser()
     if not browser:
@@ -1131,22 +1477,26 @@ def export_csv(username=None, password=None, start_date=None, end_date=None):
                 # Unpack the targets dataframe and column names
                 targets_df, target_col, rpc_col = result
                 
-                # Morning run: save results for afternoon comparison
+                # Based on the run type, perform different actions
                 if is_morning_run:
-                    logger.info("Saving morning results for afternoon comparison")
+                    # Morning run: simply save results and show targets above threshold
+                    logger.info("Processing morning run (11 AM ET)")
                     save_morning_results(targets_df, target_col, rpc_col)
+                    send_results_to_slack(targets_df, target_col, rpc_col, run_label='morning')
                     
-                    # Send morning notification
-                    send_results_to_slack(targets_df, target_col, rpc_col)
-                
-                # Afternoon run: compare with morning results
+                elif is_midday_run:
+                    # Midday run: compare with morning results
+                    logger.info("Processing midday run (2 PM ET)")
+                    compare_and_send_midday_results(targets_df, target_col, rpc_col)
+                    
                 elif is_afternoon_run:
-                    logger.info("Comparing afternoon results with morning run")
+                    # Afternoon run: compare with midday results (or morning if midday not available)
+                    logger.info("Processing afternoon run (4:30 PM ET)")
                     compare_and_send_afternoon_results(targets_df, target_col, rpc_col)
                 
-                # Neither morning nor afternoon: just send regular notification
                 else:
-                    logger.info("Sending regular notification (not a scheduled run)")
+                    # Default behavior for manual runs
+                    logger.info("Processing manual run")
                     send_results_to_slack(targets_df, target_col, rpc_col)
             else:
                 logger.error("Failed to process CSV file")

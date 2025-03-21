@@ -1,6 +1,6 @@
 services:
   - type: cron
-    name: ringba-csv-exporter
+    name: ringba-csv-exporter-morning
     env: docker
     dockerfilePath: ./Dockerfile
     plan: starter
@@ -15,11 +15,67 @@ services:
       - key: RPC_THRESHOLD
         value: 10.0
       - key: MORNING_CHECK_TIME
-        value: 10:00
+        value: 11:00
       - key: AFTERNOON_CHECK_TIME
         value: 15:00
+      - key: RUN_LABEL
+        value: morning
       - key: TZ
         value: America/New_York
       - key: SLACK_WEBHOOK_URL
         sync: false
-    schedule: 0 10,15 * * *
+    schedule: 0 15 * * *  # 11 AM ET = 15:00 UTC
+
+  - type: cron
+    name: ringba-csv-exporter-midday
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    branch: main
+    numInstances: 1
+    autoDeploy: true
+    envVars:
+      - key: RINGBA_USERNAME
+        sync: false
+      - key: RINGBA_PASSWORD
+        sync: false
+      - key: RPC_THRESHOLD
+        value: 10.0
+      - key: MORNING_CHECK_TIME
+        value: 11:00
+      - key: AFTERNOON_CHECK_TIME
+        value: 14:00
+      - key: RUN_LABEL
+        value: midday
+      - key: TZ
+        value: America/New_York
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+    schedule: 0 18 * * *  # 2 PM ET = 18:00 UTC
+
+  - type: cron
+    name: ringba-csv-exporter-afternoon
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    branch: main
+    numInstances: 1
+    autoDeploy: true
+    envVars:
+      - key: RINGBA_USERNAME
+        sync: false
+      - key: RINGBA_PASSWORD
+        sync: false
+      - key: RPC_THRESHOLD
+        value: 10.0
+      - key: MORNING_CHECK_TIME
+        value: 11:00
+      - key: AFTERNOON_CHECK_TIME
+        value: 16:30
+      - key: RUN_LABEL
+        value: afternoon
+      - key: TZ
+        value: America/New_York
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+    schedule: 30 20 * * *  # 4:30 PM ET = 20:30 UTC 
