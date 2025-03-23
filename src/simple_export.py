@@ -1400,36 +1400,62 @@ def export_csv(username=None, password=None, start_date=None, end_date=None):
     
     logger.info(f"Starting CSV export for period {start_date} to {end_date}")
     
-    # Get the run label from environment variable, default to checking time if not set
-    run_label = os.getenv('RUN_LABEL', '').lower()
-    
     # Determine run time based on current time in EST
     eastern = pytz.timezone('US/Eastern')
     current_time_est = datetime.now(pytz.utc).astimezone(eastern)
+    current_hour = current_time_est.hour
+    current_minute = current_time_est.minute
     logger.info(f"Current time in EST: {current_time_est.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     # Get the configured times for different runs
     morning_time_str = os.getenv('MORNING_CHECK_TIME', '11:00')
-    afternoon_time_str = os.getenv('AFTERNOON_CHECK_TIME', '16:30')
     midday_time_str = os.getenv('MIDDAY_CHECK_TIME', '14:00')
+    afternoon_time_str = os.getenv('AFTERNOON_CHECK_TIME', '16:30')
     
-    # Determine run type based on RUN_LABEL
+    # Parse time strings to hours and add debug logging
+    try:
+        morning_hour = int(morning_time_str.split(':')[0])
+        morning_minute = int(morning_time_str.split(':')[1]) if ':' in morning_time_str else 0
+        midday_hour = int(midday_time_str.split(':')[0])
+        midday_minute = int(midday_time_str.split(':')[1]) if ':' in midday_time_str else 0
+        afternoon_hour = int(afternoon_time_str.split(':')[0])
+        afternoon_minute = int(afternoon_time_str.split(':')[1]) if ':' in afternoon_time_str else 0
+        
+        logger.info(f"Morning check time: {morning_hour}:{morning_minute:02d}")
+        logger.info(f"Midday check time: {midday_hour}:{midday_minute:02d}")
+        logger.info(f"Afternoon check time: {afternoon_hour}:{afternoon_minute:02d}")
+    except Exception as e:
+        logger.error(f"Error parsing time settings: {str(e)}")
+        # Fallback to default times
+        morning_hour, morning_minute = 11, 0
+        midday_hour, midday_minute = 14, 0
+        afternoon_hour, afternoon_minute = 16, 30
+        logger.info(f"Using fallback times: 11:00, 14:00, 16:30")
+    
+    # Determine run type based on current time with wider windows
     is_morning_run = False
     is_midday_run = False
     is_afternoon_run = False
     
-    if run_label == 'morning':
+    # Use time windows instead of exact matches (30 minute window for each run)
+    time_now_minutes = current_hour * 60 + current_minute
+    morning_time_minutes = morning_hour * 60 + morning_minute
+    midday_time_minutes = midday_hour * 60 + midday_minute
+    afternoon_time_minutes = afternoon_hour * 60 + afternoon_minute
+    
+    if abs(time_now_minutes - morning_time_minutes) <= 30:
         is_morning_run = True
-        logger.info(f"This is a morning run (based on RUN_LABEL={run_label})")
-    elif run_label == 'midday':
+        logger.info(f"This is a morning run (current time {current_hour}:{current_minute:02d} within 30 min of {morning_hour}:{morning_minute:02d})")
+    elif abs(time_now_minutes - midday_time_minutes) <= 30:
         is_midday_run = True
-        logger.info(f"This is a midday run (based on RUN_LABEL={run_label})")
-    elif run_label == 'afternoon':
+        logger.info(f"This is a midday run (current time {current_hour}:{current_minute:02d} within 30 min of {midday_hour}:{midday_minute:02d})")
+    elif abs(time_now_minutes - afternoon_time_minutes) <= 30:
         is_afternoon_run = True
-        logger.info(f"This is an afternoon run (based on RUN_LABEL={run_label})")
+        logger.info(f"This is an afternoon run (current time {current_hour}:{current_minute:02d} within 30 min of {afternoon_hour}:{afternoon_minute:02d})")
     else:
-        # If no label, use default behavior
-        logger.info("No run label specified, using default behavior")
+        # Default to morning run behavior for manual runs
+        is_morning_run = True
+        logger.info(f"This is a manual run at {current_hour}:{current_minute:02d} (defaulting to morning run behavior)")
     
     browser = setup_browser()
     if not browser:

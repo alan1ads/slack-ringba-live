@@ -28,9 +28,9 @@ services:
         value: 16:30
       - key: TZ
         value: America/New_York
-    cron: "0 15,18 * * * 30 20 * * *"  # This is not valid syntax
-    # We need to use multiple schedules instead
-    schedule: "0 15 * * *"  # 11am ET (15 UTC)
+    # Schedule for 11 AM ET
+    schedule: "0 15 * * *"
+    # Extra schedules for 2 PM and 4:30 PM ET
     extraSchedules:
-      - schedule: "0 18 * * *"  # 2pm ET (18 UTC)
-      - schedule: "30 20 * * *"  # 4:30pm ET (20:30 UTC) 
+      - cron: "0 18 * * *"  # 2 PM ET (18:00 UTC)
+      - cron: "30 20 * * *"  # 4:30 PM ET (20:30 UTC) 
