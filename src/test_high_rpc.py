@@ -70,7 +70,7 @@ def main():
                 rpc = revenue / calls
                 logger.info(f"Target has {calls} calls, ${revenue} revenue, RPC: ${rpc:.2f}")
                 
-                if rpc >= 10.0:
+                if rpc >= 12.0:
                     high_rpc_targets.append({
                         'id': target_id,
                         'name': target_name,
@@ -83,11 +83,11 @@ def main():
     
     # Show summary
     if high_rpc_targets:
-        logger.info(f"Found {len(high_rpc_targets)} targets with RPC above $10.00")
+        logger.info(f"Found {len(high_rpc_targets)} targets with RPC above $12.00")
         for target in high_rpc_targets:
             logger.info(f"High RPC Target: {target['name']} - RPC: ${target['rpc']:.2f}")
     else:
-        logger.info("No targets found with RPC above $10.00")
+        logger.info("No targets found with RPC above $12.00")
 
 if __name__ == "__main__":
     main() 
