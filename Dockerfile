@@ -46,6 +46,10 @@ RUN mkdir -p data screenshots
 ENV USE_HEADLESS=true
 ENV PYTHONUNBUFFERED=true
 ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions"
+ENV PORT=8080
 
-# Run the script
-CMD ["python", "src/simple_export.py"] 
+# Expose the port for the web service
+EXPOSE 8080
+
+# Run the web service
+CMD ["python", "src/web_service.py"] 

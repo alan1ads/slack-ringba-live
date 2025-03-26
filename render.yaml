@@ -1,12 +1,13 @@
 services:
-  - type: cron
-    name: ringba-csv-exporter
+  - type: web
+    name: ringba-exporter
     env: docker
     dockerfilePath: ./Dockerfile
     plan: starter
     branch: main
     numInstances: 1
     autoDeploy: true
+    healthCheckPath: /
     envVars:
       - key: RINGBA_USERNAME
         sync: false
@@ -28,9 +29,9 @@ services:
         value: 16:30
       - key: TZ
         value: America/New_York
-    # Schedule for 11 AM ET
-    schedule: "0 15 * * *"
-    # Extra schedules for 2 PM and 4:30 PM ET
-    extraSchedules:
-      - cron: "0 18 * * *"  # 2 PM ET (18:00 UTC)
-      - cron: "30 20 * * *"  # 4:30 PM ET (20:30 UTC) 
+      - key: PYTHONUNBUFFERED
+        value: "true"
+      - key: USE_HEADLESS
+        value: "true"
+      - key: CHROME_OPTIONS
+        value: "--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions" 

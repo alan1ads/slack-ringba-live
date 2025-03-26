@@ -768,9 +768,9 @@ def send_results_to_slack(targets_df, target_col, rpc_col, run_label=''):
         # Format the date for display
         today = datetime.now().strftime('%Y-%m-%d')
         
-        # Get targets meeting the RPC threshold
-        high_rpc_targets = targets_df[targets_df[rpc_col] >= rpc_threshold]
-        target_count = len(high_rpc_targets)
+        # Get targets BELOW the RPC threshold - changed to show low RPC targets
+        low_rpc_targets = targets_df[targets_df[rpc_col] < rpc_threshold]
+        target_count = len(low_rpc_targets)
         
         # Format run time based on label or current time
         if run_label:
@@ -795,16 +795,16 @@ def send_results_to_slack(targets_df, target_col, rpc_col, run_label=''):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"Found *{target_count}* targets with RPC >= {rpc_threshold}"
+                        "text": f"Found *{target_count}* targets with RPC < {rpc_threshold} 📉"
                     }
                 }
             ]
         }
         
         # Add targets to message
-        if not high_rpc_targets.empty:
+        if not low_rpc_targets.empty:
             target_list = ""
-            for _, row in high_rpc_targets.iterrows():
+            for _, row in low_rpc_targets.iterrows():
                 target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 
                 target_list += f"• *{target_name}*: RPC = {row[rpc_col]:.2f}\n"
@@ -821,7 +821,7 @@ def send_results_to_slack(targets_df, target_col, rpc_col, run_label=''):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "No targets meeting RPC threshold."
+                    "text": "🎉 Great news! No targets below RPC threshold."
                 }
             })
         
@@ -1014,15 +1014,15 @@ def compare_and_send_midday_results(targets_df, target_col, rpc_col):
             (merged_df['midday_rpc'] < rpc_threshold)
         ]
         
-        # Current targets above threshold in midday run
-        current_above_threshold = merged_df[merged_df['midday_rpc'] >= rpc_threshold]
+        # Current targets BELOW threshold in midday run
+        current_below_threshold = merged_df[merged_df['midday_rpc'] < rpc_threshold]
         
         # Save midday results for afternoon comparison
         save_midday_results(targets_df, target_col, 'midday_rpc')
         
         # Send midday results with comparison
         return send_midday_comparison_to_slack(
-            targets_df=current_above_threshold, 
+            targets_df=current_below_threshold, 
             went_below_df=went_below_threshold, 
             target_col=target_col, 
             rpc_col='midday_rpc', 
@@ -1087,7 +1087,7 @@ def send_midday_comparison_to_slack(targets_df, went_below_df, target_col, rpc_c
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*No targets fell below threshold since morning*"
+                    "text": "*No targets fell below threshold since morning* 🎉"
                 }
             })
         
@@ -1096,9 +1096,9 @@ def send_midday_comparison_to_slack(targets_df, went_below_df, target_col, rpc_c
             "type": "divider"
         })
         
-        # Current targets above threshold
+        # Current targets BELOW threshold
         if not targets_df.empty:
-            current_list = f"*Current Targets Above ${rpc_threshold:.2f} RPC:* 📊\n"
+            current_list = f"*Current Targets Below ${rpc_threshold:.2f} RPC:* 📉\n"
             for _, row in targets_df.iterrows():
                 target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 rpc_value = row[rpc_col]
@@ -1116,7 +1116,7 @@ def send_midday_comparison_to_slack(targets_df, went_below_df, target_col, rpc_c
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*No targets currently above ${rpc_threshold:.2f} RPC*"
+                    "text": f"*No targets currently below ${rpc_threshold:.2f} RPC* 🎉"
                 }
             })
         
@@ -1195,12 +1195,12 @@ def compare_and_send_afternoon_results(targets_df, target_col, rpc_col, run_labe
                 (merged_df['afternoon_rpc'] < rpc_threshold)
             ]
             
-            # Current targets above threshold in afternoon run
-            current_above_threshold = merged_df[merged_df['afternoon_rpc'] >= rpc_threshold]
+            # Current targets BELOW threshold in afternoon run
+            current_below_threshold = merged_df[merged_df['afternoon_rpc'] < rpc_threshold]
             
             # Send afternoon results with comparison to midday
             return send_afternoon_comparison_to_slack(
-                targets_df=current_above_threshold, 
+                targets_df=current_below_threshold, 
                 went_below_df=went_below_threshold, 
                 previous_run_name="midday",
                 target_col=target_col, 
@@ -1254,12 +1254,12 @@ def compare_and_send_afternoon_results(targets_df, target_col, rpc_col, run_labe
             (merged_df['afternoon_rpc'] < rpc_threshold)
         ]
         
-        # Current targets above threshold in afternoon run
-        current_above_threshold = merged_df[merged_df['afternoon_rpc'] >= rpc_threshold]
+        # Current targets BELOW threshold in afternoon run
+        current_below_threshold = merged_df[merged_df['afternoon_rpc'] < rpc_threshold]
         
         # Send afternoon results with comparison to morning
         return send_afternoon_comparison_to_slack(
-            targets_df=current_above_threshold, 
+            targets_df=current_below_threshold, 
             went_below_df=went_below_threshold, 
             previous_run_name="morning",
             target_col=target_col, 
@@ -1325,7 +1325,7 @@ def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_n
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*No targets fell below threshold since {previous_run_name} run*"
+                    "text": f"*No targets fell below threshold since {previous_run_name} run* 🎉"
                 }
             })
         
@@ -1334,9 +1334,9 @@ def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_n
             "type": "divider"
         })
         
-        # Current targets above threshold
+        # Current targets BELOW threshold
         if not targets_df.empty:
-            current_list = f"*Current Targets Above ${rpc_threshold:.2f} RPC:* 📊\n"
+            current_list = f"*Current Targets Below ${rpc_threshold:.2f} RPC:* 📉\n"
             for _, row in targets_df.iterrows():
                 target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
                 rpc_value = row[rpc_col]
@@ -1354,7 +1354,7 @@ def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_n
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*No targets currently above ${rpc_threshold:.2f} RPC*"
+                    "text": f"*No targets currently below ${rpc_threshold:.2f} RPC* 🎉"
                 }
             })
         
