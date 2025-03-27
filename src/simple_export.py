@@ -170,12 +170,12 @@ def setup_browser():
         # Set page load strategy to eager (don't wait for all resources)
         chrome_options.page_load_strategy = 'eager'
             
-        # Create an explicit download directory that's guaranteed to be writable in the container
-        download_dir = os.path.join(os.path.abspath(os.getcwd()), "downloads")
+        # In container environments, use /tmp which is guaranteed to be writable
+        download_dir = "/tmp"
         os.makedirs(download_dir, exist_ok=True)
-        logger.info(f"Created download directory: {download_dir}")
+        logger.info(f"Using /tmp as download directory for container compatibility")
         
-        # Check if directory is writable
+        # Check if directory is writable with a test file
         try:
             test_file_path = os.path.join(download_dir, "test_file.txt")
             with open(test_file_path, "w") as f:
@@ -184,8 +184,8 @@ def setup_browser():
             logger.info(f"Download directory {download_dir} is writable")
         except Exception as e:
             logger.error(f"Download directory {download_dir} is not writable: {str(e)}")
-            # Try fallback to /tmp
-            download_dir = "/tmp"
+            # Try fallback to current directory
+            download_dir = os.path.abspath(os.getcwd())
             logger.info(f"Using fallback download directory: {download_dir}")
             
         # Set very explicit download settings
@@ -424,29 +424,14 @@ def set_date_range(browser, start_date, end_date):
     return True
 
 def click_export_csv(browser):
-    """Click the Export CSV button and download the file"""
+    """Click the Export CSV button and download the file, or extract data directly from the page"""
     try:
-        # Get the download directory from the environment variable set in setup_browser
-        download_dir = os.environ.get("DOWNLOAD_DIR", os.path.join(os.path.abspath(os.getcwd()), "downloads"))
-        logger.info(f"Using download directory: {download_dir}")
-        
-        # Ensure the directory exists
-        os.makedirs(download_dir, exist_ok=True)
-        
-        # Get list of existing CSV files before export attempt (to compare later)
-        existing_csv_files = set()
-        try:
-            existing_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
-            logger.info(f"Existing CSV files before export: {existing_csv_files}")
-        except Exception as e:
-            logger.warning(f"Error listing existing CSV files: {str(e)}")
-        
         # Navigate directly to the summary page with export option
         logger.info("Navigating directly to call summary report...")
         try:
             browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
             logger.info("Waiting for summary page to load...")
-            time.sleep(15)  # Give page more time to load
+            time.sleep(20)  # Give page more time to load
         except Exception as e:
             logger.error(f"Failed to navigate to summary page: {str(e)}")
             take_screenshot(browser, "navigation_failed")
@@ -454,26 +439,24 @@ def click_export_csv(browser):
         # Take screenshot to see page state
         take_screenshot(browser, "before_export_attempt")
         
-        # First try to change the download directory via JavaScript
+        # Get the download directory from environment variable
+        download_dir = os.environ.get("DOWNLOAD_DIR", "/tmp")
+        logger.info(f"Using download directory: {download_dir}")
+        
+        # Get list of existing CSV files before export attempt
+        existing_csv_files = set()
         try:
-            logger.info("Setting download directory via JavaScript")
-            browser.execute_script(f"""
-                Object.defineProperty(navigator, 'userAgent', {{'get': function() {{
-                    return 'Mozilla/5.0 Chrome/87.0.4280.88';
-                }}}});
-                // Try to set download path
-                navigator.registerProtocolHandler('web+download', '{download_dir}/$1', 'Download Handler');
-            """)
+            existing_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
+            logger.info(f"Existing CSV files before export: {list(existing_csv_files)}")
         except Exception as e:
-            logger.warning(f"Failed to set download directory via JavaScript: {str(e)}")
-            
-        # Try multiple approaches to find and click the export button
-        logger.info("Trying multiple approaches to find and click EXPORT CSV button...")
+            logger.warning(f"Error listing existing CSV files: {str(e)}")
+        
+        # Try clicking the export button
         export_clicked = False
         
-        # Approach 1: Use JavaScript to find and click the button by text content
+        # Try with JavaScript to find and click by text content
         try:
-            logger.info("Approach 1: Using JavaScript to find button by text content")
+            logger.info("Using JavaScript to find and click EXPORT CSV button")
             result = browser.execute_script("""
                 // Find all buttons/spans that contain 'export' or 'csv'
                 var buttons = [];
@@ -485,7 +468,7 @@ def click_export_csv(browser):
                     }
                 });
                 
-                // Log what we found for debugging
+                // Log findings
                 console.log("Found " + buttons.length + " potential export buttons");
                 buttons.forEach(function(b, i) { 
                     console.log(i + ": " + b.textContent.trim() + " - " + b.tagName); 
@@ -506,189 +489,164 @@ def click_export_csv(browser):
                 time.sleep(15)  # Wait for download to start
             else:
                 logger.warning("Could not find export button via JavaScript")
-                take_screenshot(browser, "js_approach_failed")
         except Exception as e:
-            logger.error(f"Error with JavaScript approach: {str(e)}")
-            take_screenshot(browser, "js_approach_error")
-        
-        # Approach 2: Try with explicit WebDriverWait and CSS selectors
-        if not export_clicked:
-            try:
-                logger.info("Approach 2: Using WebDriverWait with various CSS selectors")
-                selectors = [
-                    "button.export-button",
-                    ".export-csv",
-                    "button.mat-button:has-text('EXPORT CSV')",
-                    "button:contains('EXPORT')",
-                    "button[title*='Export']",
-                    "a.export-link"
-                ]
-                
-                for selector in selectors:
-                    try:
-                        logger.info(f"Trying selector: {selector}")
-                        export_button = WebDriverWait(browser, 5).until(
-                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                        )
-                        logger.info(f"Found button with selector: {selector}")
-                        export_button.click()
-                        logger.info("Clicked the export button")
-                        export_clicked = True
-                        time.sleep(15)  # Wait for download to start
-                        break
-                    except Exception as e:
-                        logger.warning(f"Selector {selector} failed: {str(e)}")
-                        continue
-            except Exception as e:
-                logger.error(f"Error with explicit selectors approach: {str(e)}")
-                take_screenshot(browser, "explicit_selectors_error")
-        
-        # Approach 3: Try with XPath to find buttons containing text
-        if not export_clicked:
-            try:
-                logger.info("Approach 3: Using XPath to find buttons by text content")
-                xpaths = [
-                    "//button[contains(., 'EXPORT')]",
-                    "//button[contains(., 'Export')]",
-                    "//button[contains(., 'CSV')]",
-                    "//a[contains(., 'Export')]",
-                    "//span[contains(., 'Export')]"
-                ]
-                
-                for xpath in xpaths:
-                    try:
-                        logger.info(f"Trying XPath: {xpath}")
-                        export_button = WebDriverWait(browser, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, xpath))
-                        )
-                        logger.info(f"Found button with XPath: {xpath}")
-                        export_button.click()
-                        logger.info("Clicked the export button")
-                        export_clicked = True
-                        time.sleep(15)  # Wait for download to start
-                        break
-                    except Exception as e:
-                        logger.warning(f"XPath {xpath} failed: {str(e)}")
-                        continue
-            except Exception as e:
-                logger.error(f"Error with XPath approach: {str(e)}")
-                take_screenshot(browser, "xpath_approach_error")
+            logger.error(f"Error with JavaScript click approach: {str(e)}")
         
         # Take screenshot after export attempt
         take_screenshot(browser, "after_export_attempt")
         
-        if not export_clicked:
-            logger.error("Failed to click export button with any method")
-            return None
+        # Wait for download to complete (if export was clicked)
+        if export_clicked:
+            logger.info("Waiting for download to complete...")
             
-        # Wait for download to complete
-        logger.info("Waiting for download to complete...")
-        
-        # Wait longer to ensure download completes (90 seconds)
-        max_wait_time = 90
-        start_time = time.time()
-        new_file = None
-        
-        # Approach 1: Check for new files in the download directory
-        while time.time() - start_time < max_wait_time:
-            # Check for new CSV files
-            try:
-                current_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
-                new_csv_files = current_csv_files - existing_csv_files
+            # Wait for file to appear in download directory
+            max_wait_time = 90
+            start_time = time.time()
+            new_file = None
+            
+            while time.time() - start_time < max_wait_time:
+                try:
+                    # List files in download directory
+                    current_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
+                    new_csv_files = current_csv_files - existing_csv_files
+                    
+                    if new_csv_files:
+                        logger.info(f"New CSV files detected: {new_csv_files}")
+                        newest_file = max(new_csv_files, key=lambda f: os.path.getctime(os.path.join(download_dir, f)))
+                        new_file = os.path.join(download_dir, newest_file)
+                        logger.info(f"Found newly downloaded CSV file: {newest_file}")
+                        
+                        # Check if file is valid CSV
+                        try:
+                            df = pd.read_csv(new_file)
+                            row_count = len(df)
+                            col_count = len(df.columns)
+                            logger.info(f"Downloaded CSV has {row_count} rows and {col_count} columns")
+                            
+                            # If we have data, return the file path
+                            if row_count > 0 and col_count > 0:
+                                return new_file
+                        except Exception as csv_err:
+                            logger.warning(f"Error reading CSV file {new_file}: {str(csv_err)}")
+                except Exception as e:
+                    logger.warning(f"Error checking for new CSV files: {str(e)}")
                 
-                if new_csv_files:
-                    logger.info(f"New CSV files detected: {new_csv_files}")
-                    # Get the most recently created file
-                    newest_file = max(new_csv_files, key=lambda f: os.path.getctime(os.path.join(download_dir, f)))
-                    new_file = os.path.join(download_dir, newest_file)
-                    logger.info(f"Found newly downloaded CSV file: {newest_file}")
-                    break
-            except Exception as e:
-                logger.warning(f"Error checking for new CSV files: {str(e)}")
+                # Wait a bit before checking again
+                logger.info(f"Waiting for download... ({int(time.time() - start_time)} seconds elapsed)")
+                time.sleep(5)
                 
-            # Wait a bit before checking again
-            logger.info(f"Waiting for download... ({int(time.time() - start_time)} seconds elapsed)")
-            time.sleep(5)
+            logger.warning("No valid downloaded CSV file detected after waiting")
         
-        # If no new file was found, try a different approach: grab the data directly from the page
-        if not new_file:
-            logger.warning("No new CSV file detected, trying to extract data directly from page")
-            try:
-                # Try to extract the table data directly from the page using JavaScript
-                table_data = browser.execute_script("""
-                    // Try to find the table element
-                    var tables = document.querySelectorAll('table.mat-table');
-                    if (tables.length === 0) {
-                        return null;
+        # If download failed or no export button clicked, extract data directly from page
+        logger.info("Attempting to extract data directly from the table on the page...")
+        try:
+            # Wait for table to be visible
+            wait = WebDriverWait(browser, 30)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table")))
+            
+            # Extract table data using JavaScript
+            table_data = browser.execute_script("""
+                // Try to find all tables on the page
+                var tables = document.querySelectorAll('table');
+                console.log("Found " + tables.length + " tables on page");
+                
+                if (tables.length === 0) {
+                    return null;
+                }
+                
+                // Select the table that likely has our data (the largest one)
+                var selectedTable = tables[0];
+                var maxCells = 0;
+                
+                for (var t = 0; t < tables.length; t++) {
+                    var cellCount = tables[t].querySelectorAll('td').length;
+                    console.log("Table " + t + " has " + cellCount + " cells");
+                    if (cellCount > maxCells) {
+                        maxCells = cellCount;
+                        selectedTable = tables[t];
+                    }
+                }
+                
+                var headers = [];
+                var rows = [];
+                
+                // Get headers - try different approaches
+                var headerCells = selectedTable.querySelectorAll('th');
+                
+                // If no th elements, try the first row
+                if (headerCells.length === 0) {
+                    headerCells = selectedTable.querySelector('tr').querySelectorAll('td');
+                }
+                
+                for (var i = 0; i < headerCells.length; i++) {
+                    var headerText = headerCells[i].innerText.trim();
+                    headers.push(headerText || ("Column" + i));
+                }
+                
+                console.log("Extracted headers: " + headers.join(", "));
+                
+                // Get rows - skip first row if it might be headers
+                var rowElements = selectedTable.querySelectorAll('tr');
+                var startRow = (headerCells.length > 0 && rowElements.length > 1) ? 1 : 0;
+                
+                for (var i = startRow; i < rowElements.length; i++) {
+                    var row = {};
+                    var cells = rowElements[i].querySelectorAll('td');
+                    
+                    // Skip empty rows
+                    if (cells.length === 0) continue;
+                    
+                    for (var j = 0; j < Math.min(cells.length, headers.length); j++) {
+                        row[headers[j]] = cells[j].innerText.trim();
                     }
                     
-                    var table = tables[0];
-                    var headers = [];
-                    var rows = [];
-                    
-                    // Get headers
-                    var headerCells = table.querySelectorAll('th');
-                    for (var i = 0; i < headerCells.length; i++) {
-                        headers.push(headerCells[i].innerText.trim());
-                    }
-                    
-                    // Get rows
-                    var rowElements = table.querySelectorAll('tr:not(:first-child)');
-                    for (var i = 0; i < rowElements.length; i++) {
-                        var row = {};
-                        var cells = rowElements[i].querySelectorAll('td');
-                        for (var j = 0; j < Math.min(cells.length, headers.length); j++) {
-                            row[headers[j]] = cells[j].innerText.trim();
-                        }
+                    // Only add non-empty rows
+                    if (Object.keys(row).length > 0) {
                         rows.push(row);
                     }
-                    
-                    return {headers: headers, rows: rows};
-                """)
+                }
                 
-                if table_data and table_data.get('rows'):
-                    logger.info(f"Successfully extracted {len(table_data['rows'])} rows of data directly from page")
-                    
-                    # Create a CSV file from the extracted data
-                    extracted_csv_path = os.path.join(download_dir, f"extracted_data_{int(time.time())}.csv")
-                    
-                    with open(extracted_csv_path, 'w', newline='') as f:
-                        writer = csv.DictWriter(f, fieldnames=table_data['headers'])
-                        writer.writeheader()
-                        writer.writerows(table_data['rows'])
-                    
-                    logger.info(f"Saved extracted data to {extracted_csv_path}")
-                    return extracted_csv_path
-                else:
-                    logger.warning("Could not extract data from page")
-            except Exception as e:
-                logger.error(f"Error extracting data from page: {str(e)}")
-        
-        if not new_file:
-            logger.error("No new CSV file detected after waiting. Download may have failed.")
-            return None
+                console.log("Extracted " + rows.length + " rows of data");
+                return {headers: headers, rows: rows};
+            """)
             
-        # Verify file is not empty and is a valid CSV
-        try:
-            file_size = os.path.getsize(new_file)
-            logger.info(f"CSV file size: {file_size} bytes")
-            
-            if file_size == 0:
-                logger.error("CSV file is empty")
-                return None
+            if table_data and table_data.get('rows') and len(table_data.get('rows')) > 0:
+                logger.info(f"Successfully extracted {len(table_data['rows'])} rows of data directly from page")
                 
-            # Check if file is valid CSV by opening with pandas
-            df = pd.read_csv(new_file)
-            logger.info(f"CSV file successfully loaded with {len(df)} rows and {len(df.columns)} columns")
-            
-            return new_file
+                # Create a CSV file from the extracted data
+                extracted_csv_path = os.path.join(download_dir, f"extracted_data_{int(time.time())}.csv")
+                
+                with open(extracted_csv_path, 'w', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=table_data['headers'])
+                    writer.writeheader()
+                    writer.writerows(table_data['rows'])
+                
+                logger.info(f"Saved extracted data to {extracted_csv_path}")
+                
+                # Verify extracted file is valid
+                try:
+                    df = pd.read_csv(extracted_csv_path)
+                    row_count = len(df)
+                    col_count = len(df.columns)
+                    logger.info(f"Extracted CSV has {row_count} rows and {col_count} columns")
+                    logger.info(f"Columns in extracted data: {', '.join(df.columns)}")
+                    
+                    if row_count > 0 and col_count > 0:
+                        return extracted_csv_path
+                except Exception as csv_err:
+                    logger.error(f"Error validating extracted CSV: {str(csv_err)}")
+            else:
+                logger.warning("No table data could be extracted from page")
         except Exception as e:
-            logger.error(f"Error validating CSV file: {str(e)}")
-            return None
+            logger.error(f"Error extracting data from page: {str(e)}")
+        
+        # If we reach here, all attempts have failed
+        logger.error("All attempts to get data failed - could not download or extract")
+        return None
             
     except Exception as e:
-        logger.error(f"Failed to export CSV: {str(e)}")
-        take_screenshot(browser, "export_error")
+        logger.error(f"Failed to get data: {str(e)}")
+        take_screenshot(browser, "data_extraction_error")
         return None
 
 def process_csv_file(file_path):
