@@ -424,7 +424,7 @@ def set_date_range(browser, start_date, end_date):
     return True
 
 def click_export_csv(browser):
-    """Click the Export CSV button and download the file directly"""
+    """Click the Export CSV button and capture the downloaded file in container environments"""
     try:
         # Navigate directly to the summary page with export option
         logger.info("Navigating directly to call summary report...")
@@ -439,59 +439,491 @@ def click_export_csv(browser):
         # Take screenshot to see page state
         take_screenshot(browser, "before_export_attempt")
         
-        # DIRECT TABLE EXTRACTION - Extract data directly from the page first
-        logger.info("Extracting data directly from page table...")
-        table_data = browser.execute_script("""
-            // Helper function to get visible text (skip hidden elements)
-            function getVisibleText(element) {
-                if (!element) return '';
-                if (element.offsetParent === null) return ''; // Skip hidden elements
-                
-                let style = window.getComputedStyle(element);
-                if (style.display === 'none' || style.visibility === 'hidden') return '';
-                
-                return element.textContent.trim();
-            }
+        # NEW: Add JavaScript that intercepts blob URLs and download events 
+        logger.info("Setting up enhanced Blob URL interception...")
+        browser.execute_script("""
+            // Store blob URLs and download data
+            window.blobUrls = [];
+            window.downloadData = null;
             
-            // Try to find tables or table-like structures
-            const tables = Array.from(document.querySelectorAll('table'));
-            const gridElements = Array.from(document.querySelectorAll('[role="grid"], [role="table"], .ag-root, .MuiTable-root'));
-            
-            console.log(`Found ${tables.length} tables and ${gridElements.length} grid elements`);
-            
-            // Function to extract from standard HTML table
-            function extractFromTable(table) {
-                const headers = [];
-                const rows = [];
+            // Override createObjectURL to capture blob URLs
+            const originalCreateObjectURL = URL.createObjectURL;
+            URL.createObjectURL = function(object) {
+                const url = originalCreateObjectURL(object);
+                console.log('Captured blob URL:', url);
                 
-                // Get header cells
-                const headerCells = table.querySelectorAll('th');
-                if (headerCells.length > 0) {
-                    for (const cell of headerCells) {
-                        headers.push(getVisibleText(cell));
-                    }
-                } else {
-                    // If no th elements, try the first row
-                    const firstRowCells = table.querySelector('tr')?.querySelectorAll('td');
-                    if (firstRowCells) {
-                        for (const cell of firstRowCells) {
-                            headers.push(getVisibleText(cell));
+                // Store the blob and URL
+                window.blobUrls.push({
+                    url: url,
+                    blob: object,
+                    timestamp: Date.now()
+                });
+                
+                // If it's a CSV, try to read it
+                if (object instanceof Blob && 
+                    (object.type === 'text/csv' || 
+                     object.type === 'application/csv' || 
+                     object.type === 'application/vnd.ms-excel' ||
+                     object.type === '')) {
+                    
+                    console.log('Found potential CSV blob:', object.type, object.size);
+                    
+                    // Read the blob
+                    const reader = new FileReader();
+                    reader.onload = function() {
+                        const content = reader.result;
+                        console.log('Read blob content, length:', content.length);
+                        
+                        // Simple CSV check
+                        if (content.includes(',') && 
+                            (content.includes('\\n') || content.includes('\\r'))) {
+                            
+                            window.downloadData = {
+                                content: content,
+                                timestamp: Date.now(),
+                                type: object.type || 'text/csv'
+                            };
+                            console.log('Saved CSV content from blob');
                         }
+                    };
+                    reader.readAsText(object);
+                }
+                
+                return url;
+            };
+            
+            // Monitor anchor downloads
+            document.addEventListener('click', function(e) {
+                let target = e.target;
+                
+                // Look for download links
+                while (target && target !== document) {
+                    if (target.tagName === 'A' && target.href && target.href.startsWith('blob:')) {
+                        console.log('Intercepted blob download click:', target.href);
+                        
+                        // Find the matching blob URL
+                        const blobInfo = window.blobUrls.find(b => b.url === target.href);
+                        if (blobInfo && blobInfo.blob) {
+                            // Read the blob
+                            const reader = new FileReader();
+                            reader.onload = function() {
+                                const content = reader.result;
+                                console.log('Read blob content from click, length:', content.length);
+                                
+                                // Store the download data
+                                window.downloadData = {
+                                    content: content,
+                                    timestamp: Date.now(),
+                                    type: blobInfo.blob.type || 'text/csv'
+                                };
+                                console.log('Saved CSV content from click');
+                            };
+                            reader.readAsText(blobInfo.blob);
+                        }
+                    }
+                    target = target.parentElement;
+                }
+            }, true);
+        """)
+        
+        # Find all possible download directories (keep existing code)
+        download_dir = "/tmp"
+        possible_download_dirs = [
+            "/tmp", 
+            "/tmp/downloads",
+            "/downloads",
+            "/home/chrome/downloads",
+            os.environ.get("HOME", "") + "/Downloads" if os.environ.get("HOME") else "",
+            os.path.join(os.getcwd(), "downloads"),
+            os.path.join(os.getcwd(), "tmp")
+        ]
+        
+        # Filter out empty paths and ensure directories exist
+        possible_download_dirs = [d for d in possible_download_dirs if d]
+        for d in possible_download_dirs:
+            os.makedirs(d, exist_ok=True)
+            
+        logger.info(f"Checking for downloads in these directories: {possible_download_dirs}")
+        
+        # Check all existing CSV files before download attempt
+        existing_csv_files = {}
+        for d in possible_download_dirs:
+            try:
+                csv_files = [f for f in os.listdir(d) if f.endswith('.csv')]
+                for f in csv_files:
+                    full_path = os.path.join(d, f)
+                    existing_csv_files[full_path] = os.path.getmtime(full_path)
+                logger.info(f"Found {len(csv_files)} existing CSV files in {d}")
+            except Exception as e:
+                logger.warning(f"Error checking directory {d}: {str(e)}")
+        
+        # Continue with existing code for tracking download activity
+        logger.info("Setting up Chrome for reliable downloads in container...")
+        browser.execute_script("""
+            // Force download behavior in Chrome
+            Object.defineProperty(navigator, 'userAgent', {
+                get: function () {
+                    return 'Mozilla/5.0 (X11; Linux x86_64) Chrome/134.0.0.0';  // Container Chrome version
+                }
+            });
+            
+            // Track download activity
+            window.downloadActivity = {
+                clicked: false,
+                buttonElements: [],
+                timestamp: null,
+                message: null
+            };
+            
+            // Monitor download-related events
+            document.addEventListener('click', function(e) {
+                let target = e.target;
+                
+                // Check if clicked element or its parent is a button/link containing "export" or "csv"
+                while (target && target !== document) {
+                    if (target.tagName === 'BUTTON' || target.tagName === 'A' || 
+                        target.getAttribute('role') === 'button') {
+                        
+                        // Check if text content contains export/csv
+                        if (target.textContent && 
+                            (target.textContent.toLowerCase().includes('export') || 
+                             target.textContent.toLowerCase().includes('csv'))) {
+                            
+                            console.log('Export button clicked:', target);
+                            window.downloadActivity.clicked = true;
+                            window.downloadActivity.buttonElements.push({
+                                tagName: target.tagName,
+                                id: target.id,
+                                className: target.className,
+                                textContent: target.textContent,
+                                time: new Date().toISOString()
+                            });
+                            window.downloadActivity.timestamp = Date.now();
+                            window.downloadActivity.message = 'Export button clicked at ' + new Date().toISOString();
+                        }
+                    }
+                    target = target.parentElement;
+                }
+            }, true);
+            
+            // Intercept potential download triggers
+            const originalOpen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function() {
+                this._method = arguments[0];
+                this._url = arguments[1];
+                
+                // Check if this might be related to a download
+                if (this._url && (
+                    this._url.includes('export') || 
+                    this._url.includes('download') ||
+                    this._url.includes('csv')
+                )) {
+                    console.log('Potential download XHR:', this._method, this._url);
+                    
+                    if (!window.downloadActivity.message) {
+                        window.downloadActivity.message = 'Download XHR detected: ' + this._url;
                     }
                 }
                 
-                // Get data rows
-                const tableRows = table.querySelectorAll('tr');
-                // Skip the first row if it was used for headers
-                const startIndex = (headerCells.length === 0 && tableRows.length > 0) ? 1 : 0;
+                return originalOpen.apply(this, arguments);
+            };
+        """)
+        
+        # Setup Chrome network monitoring to track download requests
+        browser.execute_cdp_cmd('Network.enable', {})
+        
+        # Click the export button
+        export_clicked = False
+        
+        logger.info("Looking for and clicking the EXPORT CSV button...")
+        try:
+            # Try JavaScript approach first
+            result = browser.execute_script("""
+                // Find EXPORT button - more comprehensive approach
+                function findExportButton() {
+                    // Save all candidates we find
+                    const candidates = [];
+                    
+                    // 1. Look for elements with "export" or "csv" in text 
+                    document.querySelectorAll('button, a, span, div').forEach(el => {
+                        if (el.textContent && (
+                            el.textContent.toLowerCase().includes('export') || 
+                            el.textContent.toLowerCase().includes('csv')
+                        )) {
+                            candidates.push({
+                                element: el,
+                                score: 10,  // Base score
+                                text: el.textContent.trim()
+                            });
+                        }
+                    });
+                    
+                    // 2. Check for elements with id/class containing export
+                    document.querySelectorAll('[id*="export" i], [class*="export" i], [data-test*="export" i]').forEach(el => {
+                        // Add if not already in candidates
+                        if (!candidates.some(c => c.element === el)) {
+                            candidates.push({
+                                element: el,
+                                score: 5,
+                                text: el.textContent.trim()
+                            });
+                        } else {
+                            // Increase score of existing candidate
+                            const existing = candidates.find(c => c.element === el);
+                            existing.score += 5;
+                        }
+                    });
+                    
+                    // Score adjustments based on various factors
+                    candidates.forEach(c => {
+                        // Exact match for "EXPORT CSV" gets highest score
+                        if (c.text.toLowerCase() === 'export csv') {
+                            c.score += 20;
+                        }
+                        
+                        // Button elements get a bonus
+                        if (c.element.tagName === 'BUTTON') {
+                            c.score += 5;
+                        }
+                        
+                        // Visible elements get a bonus
+                        const style = window.getComputedStyle(c.element);
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && 
+                            c.element.offsetWidth > 0 && c.element.offsetHeight > 0) {
+                            c.score += 10;
+                        }
+                    });
+                    
+                    // Sort by score (highest first)
+                    candidates.sort((a, b) => b.score - a.score);
+                    
+                    console.log('Found ' + candidates.length + ' export button candidates');
+                    candidates.forEach((c, i) => {
+                        console.log(`Candidate ${i}: ${c.element.tagName} "${c.text}" - Score: ${c.score}`);
+                    });
+                    
+                    return candidates.length > 0 ? candidates[0].element : null;
+                }
                 
-                for (let i = startIndex; i < tableRows.length; i++) {
-                    const rowCells = tableRows[i].querySelectorAll('td');
-                    if (rowCells.length === 0) continue;
+                // Find and click the export button
+                const exportButton = findExportButton();
+                if (exportButton) {
+                    console.log('Clicking export button:', exportButton.outerHTML);
+                    exportButton.click();
+                    return true;
+                }
+                
+                return false;
+            """)
+            
+            if result:
+                logger.info("Successfully clicked export button with JavaScript")
+                export_clicked = True
+            else:
+                # Fall back to Selenium approach
+                logger.warning("JavaScript approach failed, trying Selenium...")
+                
+                # Try different locators
+                locators = [
+                    (By.XPATH, "//button[contains(text(), 'Export')]"),
+                    (By.XPATH, "//button[contains(text(), 'CSV')]"),
+                    (By.XPATH, "//span[contains(text(), 'Export')]"),
+                    (By.CSS_SELECTOR, "[id*='export']"),
+                    (By.CSS_SELECTOR, "[class*='export']"),
+                    (By.CSS_SELECTOR, "[title*='Export']"),
+                ]
+                
+                for locator_type, locator_value in locators:
+                    try:
+                        element = browser.find_element(locator_type, locator_value)
+                        logger.info(f"Found export button with locator: {locator_value}")
+                        element.click()
+                        export_clicked = True
+                        break
+                    except Exception as e:
+                        logger.warning(f"Could not find/click with locator {locator_value}: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Error clicking export button: {str(e)}")
+        
+        # Take screenshot after clicking export
+        take_screenshot(browser, "after_export_attempt")
+        
+        if not export_clicked:
+            logger.error("Could not click export button with any method")
+            return None
+        
+        # Wait for download to complete
+        logger.info("Waiting for download to complete...")
+        wait_time = 60  # 1 minute wait maximum
+        start_time = time.time()
+        
+        # First try to get data directly from the intercepted blob 
+        while time.time() - start_time < wait_time:
+            # NEW: Check for blob data first
+            download_data = browser.execute_script("return window.downloadData;")
+            if download_data and download_data.get('content'):
+                logger.info("Found download data directly from blob interception!")
+                
+                # Save the content to a file
+                file_path = os.path.join("/tmp", f"blob_download_{int(time.time())}.csv")
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(download_data['content'])
+                
+                logger.info(f"Saved blob data to {file_path}")
+                
+                # Verify it's a valid CSV
+                try:
+                    df = pd.read_csv(file_path)
+                    logger.info(f"Successfully read CSV from blob with {len(df)} rows and {len(df.columns)} columns")
+                    return file_path
+                except Exception as e:
+                    logger.warning(f"Blob data is not a valid CSV: {str(e)}")
+            
+            # Check if there are any new CSV files in the download directories
+            new_files = []
+            
+            # Check all possible download directories for new files
+            for d in possible_download_dirs:
+                try:
+                    # Get all CSV files in this directory
+                    curr_files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.csv')]
+                    
+                    # Check which ones are new
+                    for file_path in curr_files:
+                        if file_path not in existing_csv_files:
+                            # New file found
+                            new_files.append(file_path)
+                        elif os.path.getmtime(file_path) > existing_csv_files.get(file_path, 0):
+                            # File was modified since we started
+                            new_files.append(file_path)
+                except Exception as e:
+                    logger.warning(f"Error checking directory {d}: {str(e)}")
+            
+            if new_files:
+                # Sort by modification time (newest first)
+                new_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+                newest_file = new_files[0]
+                
+                logger.info(f"Found new CSV file: {newest_file}")
+                
+                # Verify it's a valid CSV
+                try:
+                    df = pd.read_csv(newest_file)
+                    logger.info(f"Successfully read CSV with {len(df)} rows and {len(df.columns)} columns")
+                    return newest_file
+                except Exception as e:
+                    logger.warning(f"File {newest_file} is not a valid CSV: {str(e)}")
+            
+            # Check download activity from browser
+            download_activity = browser.execute_script("return window.downloadActivity || {};")
+            if download_activity:
+                logger.info(f"Download activity: {download_activity}")
+            
+            # Log progress every 10 seconds
+            elapsed = int(time.time() - start_time)
+            if elapsed % 10 == 0:
+                logger.info(f"Still waiting for download... ({elapsed}s elapsed)")
+            
+            time.sleep(3)
+        
+        logger.warning("No new CSV files found after waiting")
+        
+        # Try the Ringba API as fallback - keep existing code
+        logger.info("Trying Ringba API as fallback...")
+        try:
+            api_token = os.getenv('RINGBA_API_TOKEN')
+            account_id = os.getenv('RINGBA_ACCOUNT_ID')
+            
+            if api_token and account_id:
+                # Get today's date range for the API query
+                today = datetime.now()
+                start_date = today.strftime('%Y-%m-%d')
+                end_date = today.strftime('%Y-%m-%d')
+                
+                # Use Ringba API to get call data
+                headers = {
+                    'Authorization': f'Bearer {api_token}',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+                
+                # Try the call logs API endpoint
+                call_logs_url = f"https://api.ringba.com/v2/ringba/accounts/{account_id}/call-logs"
+                params = {
+                    'startDate': start_date,
+                    'endDate': end_date,
+                    'format': 'csv'
+                }
+                
+                logger.info(f"Making API request to: {call_logs_url}")
+                response = requests.get(call_logs_url, headers=headers, params=params)
+                
+                if response.status_code == 200:
+                    logger.info("Successfully retrieved data from Ringba API")
+                    
+                    # Save response content to a CSV file
+                    download_dir = "/tmp"
+                    os.makedirs(download_dir, exist_ok=True)
+                    file_path = os.path.join(download_dir, f"ringba_api_{int(time.time())}.csv")
+                    
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(response.text)
+                    
+                    logger.info(f"Saved API response to {file_path}")
+                    
+                    # Verify it's a valid CSV
+                    try:
+                        df = pd.read_csv(file_path)
+                        logger.info(f"API CSV has {len(df)} rows and {len(df.columns)} columns")
+                        return file_path
+                    except Exception as e:
+                        logger.warning(f"API response not a valid CSV: {str(e)}")
+                else:
+                    logger.warning(f"API call failed with status {response.status_code}: {response.text}")
+            else:
+                logger.warning("Missing API token or account ID, can't use API fallback")
+        except Exception as e:
+            logger.error(f"Error using Ringba API: {str(e)}")
+        
+        # Keep existing page extraction code
+        # If we get here, try to extract data directly from the page as last resort
+        logger.info("Trying to extract data directly from page as final fallback...")
+        
+        # The extraction script is similar to before but more thorough
+        table_data = browser.execute_script("""
+            // Find any data tables on the page
+            const tables = document.querySelectorAll('table');
+            console.log(`Found ${tables.length} tables on page`);
+            
+            // Function to extract data from table
+            function extractFromTable(table) {
+                const rows = [];
+                const headers = [];
+                
+                // Get headers
+                const headerRow = table.querySelector('thead tr') || table.querySelector('tr');
+                if (headerRow) {
+                    const headerCells = headerRow.querySelectorAll('th, td');
+                    for (const cell of headerCells) {
+                        headers.push(cell.textContent.trim());
+                    }
+                }
+                
+                // Get data rows - start from second row if we used the first for headers
+                const dataRows = table.querySelectorAll('tbody tr, tr');
+                const startIdx = (table.querySelector('thead')) ? 0 : 1;
+                
+                for (let i = startIdx; i < dataRows.length; i++) {
+                    const row = dataRows[i];
+                    const cells = row.querySelectorAll('td');
+                    
+                    if (cells.length === 0) continue;
                     
                     const rowData = {};
-                    for (let j = 0; j < Math.min(rowCells.length, headers.length); j++) {
-                        rowData[headers[j] || `Column${j}`] = getVisibleText(rowCells[j]);
+                    for (let j = 0; j < Math.min(cells.length, headers.length); j++) {
+                        rowData[headers[j] || `Column${j+1}`] = cells[j].textContent.trim();
                     }
                     
                     if (Object.keys(rowData).length > 0) {
@@ -499,38 +931,51 @@ def click_export_csv(browser):
                     }
                 }
                 
-                return { headers, rows, type: 'table' };
+                return { headers, rows };
             }
             
-            // Function to extract from grid components
-            function extractFromGrid(grid) {
+            // Extract from all tables and find the one with most rows
+            let bestTable = null;
+            let maxRows = 0;
+            
+            for (const table of tables) {
+                const data = extractFromTable(table);
+                if (data.rows.length > maxRows) {
+                    maxRows = data.rows.length;
+                    bestTable = data;
+                }
+            }
+            
+            if (bestTable && bestTable.rows.length > 0) {
+                return bestTable;
+            }
+            
+            // If no tables found, check for grid components
+            const grids = document.querySelectorAll('[role="grid"], .ag-root, .data-grid');
+            console.log(`Found ${grids.length} grid components`);
+            
+            if (grids.length > 0) {
+                // Extract from first grid (assuming it's the main one)
+                const grid = grids[0];
                 const headers = [];
                 const rows = [];
                 
-                // Look for header cells
-                const headerElements = grid.querySelectorAll('[role="columnheader"], .ag-header-cell, .MuiTableCell-head');
-                if (headerElements.length > 0) {
-                    for (const cell of headerElements) {
-                        headers.push(getVisibleText(cell));
-                    }
+                // Find headers
+                const headerCells = grid.querySelectorAll('[role="columnheader"], .ag-header-cell');
+                for (const cell of headerCells) {
+                    headers.push(cell.textContent.trim());
                 }
                 
-                // Find row elements
-                const rowElements = grid.querySelectorAll('[role="row"], .ag-row, .MuiTableRow-root');
-                
-                // If we have headers, we can skip the first row if it's the header row
-                const startIndex = (headers.length > 0 && rowElements[0]?.contains(headerElements[0])) ? 1 : 0;
-                
-                // Extract data from rows
-                for (let i = startIndex; i < rowElements.length; i++) {
-                    const row = rowElements[i];
-                    const cells = row.querySelectorAll('[role="cell"], [role="gridcell"], .ag-cell, .MuiTableCell-body');
+                // Find rows
+                const rowElements = grid.querySelectorAll('[role="row"], .ag-row');
+                for (const row of rowElements) {
+                    const cells = row.querySelectorAll('[role="cell"], .ag-cell');
                     
                     if (cells.length === 0) continue;
                     
                     const rowData = {};
                     for (let j = 0; j < Math.min(cells.length, headers.length || cells.length); j++) {
-                        rowData[headers[j] || `Column${j}`] = getVisibleText(cells[j]);
+                        rowData[headers[j] || `Column${j+1}`] = cells[j].textContent.trim();
                     }
                     
                     if (Object.keys(rowData).length > 0) {
@@ -538,274 +983,31 @@ def click_export_csv(browser):
                     }
                 }
                 
-                return { headers, rows, type: 'grid' };
-            }
-            
-            // Try both table and grid approaches
-            let results = [];
-            
-            // Process tables
-            for (const table of tables) {
-                const result = extractFromTable(table);
-                if (result.rows.length > 0) {
-                    results.push({
-                        ...result,
-                        elementId: table.id || null,
-                        className: table.className || null,
-                        rowCount: result.rows.length
-                    });
+                if (rows.length > 0) {
+                    return { headers, rows };
                 }
             }
             
-            // Process grids
-            for (const grid of gridElements) {
-                const result = extractFromGrid(grid);
-                if (result.rows.length > 0) {
-                    results.push({
-                        ...result,
-                        elementId: grid.id || null,
-                        className: grid.className || null,
-                        rowCount: result.rows.length
-                    });
-                }
-            }
-            
-            // Sort by row count (most rows first)
-            results.sort((a, b) => b.rowCount - a.rowCount);
-            
-            return results.length > 0 ? results[0] : null;
+            return null;
         """)
         
-        # Try to use the extracted table data if available
         if table_data and table_data.get('rows') and len(table_data.get('rows')) > 0:
-            logger.info(f"Successfully extracted {len(table_data['rows'])} rows from {table_data['type']} on page")
+            logger.info(f"Successfully extracted {len(table_data['rows'])} rows directly from page")
             
             # Save to CSV
             download_dir = "/tmp"
             os.makedirs(download_dir, exist_ok=True)
-            file_path = os.path.join(download_dir, f"direct_extract_{int(time.time())}.csv")
+            file_path = os.path.join(download_dir, f"page_extract_{int(time.time())}.csv")
             
             # Convert to DataFrame and save
             df = pd.DataFrame(table_data['rows'])
             df.to_csv(file_path, index=False)
             
-            logger.info(f"Saved table data to {file_path}")
+            logger.info(f"Saved extracted data to {file_path}")
             return file_path
-        else:
-            logger.warning("No table data could be extracted directly from page")
         
-        # Now try clicking export button and capture the network response
-        logger.info("Setting up network interception...")
-        browser.execute_script("""
-            // Capture network responses to CSV requests
-            window.csvResponseData = null;
-            
-            // Override fetch to capture CSV responses
-            const originalFetch = window.fetch;
-            window.fetch = function(input, init) {
-                return originalFetch(input, init).then(response => {
-                    const url = typeof input === 'string' ? input : input.url;
-                    
-                    // Check if this might be CSV data
-                    if (url && (url.includes('export') || url.includes('csv'))) {
-                        console.log('Intercepted potential CSV fetch:', url);
-                        
-                        // Clone the response to consume it
-                        const clonedResponse = response.clone();
-                        
-                        clonedResponse.text().then(text => {
-                            console.log('Captured response data, length:', text.length);
-                            
-                            // Simple check if it looks like CSV
-                            if (text.includes(',') && (text.includes('\\n') || text.includes('\\r'))) {
-                                window.csvResponseData = {
-                                    url: url,
-                                    data: text,
-                                    time: new Date().getTime()
-                                };
-                                console.log('Saved CSV response data');
-                            }
-                        }).catch(err => {
-                            console.error('Error reading response:', err);
-                        });
-                    }
-                    
-                    return response;
-                });
-            };
-            
-            // Also override XMLHttpRequest
-            const originalOpen = XMLHttpRequest.prototype.open;
-            const originalSend = XMLHttpRequest.prototype.send;
-            
-            XMLHttpRequest.prototype.open = function(method, url) {
-                this._url = url;
-                return originalOpen.apply(this, arguments);
-            };
-            
-            XMLHttpRequest.prototype.send = function() {
-                const xhr = this;
-                
-                if (xhr._url && (xhr._url.includes('export') || xhr._url.includes('csv'))) {
-                    console.log('Intercepted potential CSV XHR:', xhr._url);
-                    
-                    // Add load listener to capture response
-                    xhr.addEventListener('load', function() {
-                        if (xhr.status === 200) {
-                            const text = xhr.responseText;
-                            console.log('Captured XHR response, length:', text.length);
-                            
-                            // Simple check if it looks like CSV
-                            if (text.includes(',') && (text.includes('\\n') || text.includes('\\r'))) {
-                                window.csvResponseData = {
-                                    url: xhr._url,
-                                    data: text,
-                                    time: new Date().getTime()
-                                };
-                                console.log('Saved CSV response data');
-                            }
-                        }
-                    });
-                }
-                
-                return originalSend.apply(this, arguments);
-            };
-        """)
-        
-        # Now click the export button
-        logger.info("Looking for the EXPORT CSV button...")
-        export_clicked = False
-        
-        # Try different approaches to click the export button
-        approaches = [
-            # 1. JavaScript approach
-            lambda: browser.execute_script("""
-                const exportButtons = [];
-                
-                // Find by text content
-                document.querySelectorAll('button, span, a, div').forEach(el => {
-                    if (el.textContent && (
-                        el.textContent.toLowerCase().includes('export') || 
-                        el.textContent.toLowerCase().includes('csv')
-                    )) {
-                        exportButtons.push(el);
-                    }
-                });
-                
-                console.log('Found', exportButtons.length, 'potential export buttons');
-                
-                // Log details of found buttons
-                exportButtons.forEach((btn, i) => {
-                    console.log(`${i}: ${btn.tagName} "${btn.textContent.trim()}" class=${btn.className}`);
-                });
-                
-                if (exportButtons.length > 0) {
-                    console.log('Clicking first export button:', exportButtons[0].outerHTML);
-                    exportButtons[0].click();
-                    return true;
-                }
-                
-                return false;
-            """),
-            
-            # 2. XPath approach
-            lambda: browser.find_element(By.XPATH, '//button[contains(text(), "Export") or contains(text(), "CSV")]').click() or True,
-            
-            # 3. CSS selector approach
-            lambda: browser.find_element(By.CSS_SELECTOR, 'button[title*="Export"], [aria-label*="export"], .export-btn').click() or True
-        ]
-        
-        for i, approach in enumerate(approaches):
-            try:
-                logger.info(f"Trying export button approach #{i+1}")
-                result = approach()
-                if result:
-                    logger.info(f"Successfully clicked export button with approach #{i+1}")
-                    export_clicked = True
-                    break
-            except Exception as e:
-                logger.warning(f"Export button approach #{i+1} failed: {str(e)}")
-        
-        # Take screenshot after clicking
-        take_screenshot(browser, "after_export_attempt")
-        
-        if not export_clicked:
-            logger.error("Failed to click export button")
-            return None
-        
-        # Wait for the download to complete
-        logger.info("Waiting for CSV data...")
-        max_wait_time = 60
-        start_time = time.time()
-        
-        while time.time() - start_time < max_wait_time:
-            # Check if we've captured CSV data
-            csv_data = browser.execute_script("return window.csvResponseData;")
-            
-            if csv_data and csv_data.get('data'):
-                logger.info(f"Captured CSV data from {csv_data.get('url')}")
-                
-                # Save to file
-                download_dir = "/tmp"
-                os.makedirs(download_dir, exist_ok=True)
-                file_path = os.path.join(download_dir, f"captured_csv_{int(time.time())}.csv")
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(csv_data['data'])
-                
-                logger.info(f"Saved captured CSV to {file_path}")
-                
-                # Verify it's a valid CSV
-                try:
-                    df = pd.read_csv(file_path)
-                    logger.info(f"Verified CSV file with {len(df)} rows and {len(df.columns)} columns")
-                    return file_path
-                except Exception as e:
-                    logger.error(f"Invalid CSV file: {str(e)}")
-                    # Continue with other approaches
-            
-            # Check every 5 seconds and log
-            if int(time.time() - start_time) % 5 == 0:
-                logger.info(f"Waiting for CSV data... ({int(time.time() - start_time)} seconds elapsed)")
-            
-            time.sleep(1)
-        
-        logger.warning("Timeout waiting for CSV data after export")
-        
-        # FALLBACK: Try to get data from the page source
-        logger.info("Trying to extract data from page source as fallback...")
-        html_source = browser.page_source
-        
-        # Save the page source for analysis
-        source_path = os.path.join("/tmp", f"page_source_{int(time.time())}.html")
-        with open(source_path, 'w', encoding='utf-8') as f:
-            f.write(html_source)
-        
-        logger.info(f"Saved page source to {source_path}")
-        
-        try:
-            # Try to parse tables with pandas
-            tables = pd.read_html(source_path)
-            if tables and len(tables) > 0:
-                logger.info(f"Found {len(tables)} tables in page source")
-                
-                # Use the largest table
-                largest_table = max(tables, key=lambda t: len(t) * len(t.columns) if not t.empty else 0)
-                
-                if not largest_table.empty:
-                    # Save as CSV
-                    csv_path = os.path.join("/tmp", f"table_extract_{int(time.time())}.csv")
-                    largest_table.to_csv(csv_path, index=False)
-                    
-                    logger.info(f"Saved largest table with {len(largest_table)} rows to {csv_path}")
-                    return csv_path
-            else:
-                logger.warning("No tables found in page source with pandas")
-        except Exception as e:
-            logger.error(f"Error extracting tables from page source: {str(e)}")
-        
-        # If we get here, all attempts failed
-        logger.error("All export attempts failed")
+        # If all methods fail, give up
+        logger.error("All methods to export CSV have failed")
         return None
         
     except Exception as e:
