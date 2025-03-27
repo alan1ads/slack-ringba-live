@@ -34,6 +34,31 @@ last_morning_run = None
 last_midday_run = None
 last_afternoon_run = None
 
+def perform_test_run():
+    """Perform a test run when the service is first deployed"""
+    logger.info("Performing initial test run for web service deployment...")
+    try:
+        # Set environment variable to identify this as a test run
+        os.environ['RUN_LABEL'] = 'test'
+        
+        # Run the export with today's date
+        result = export_csv(
+            username=None,  # Use environment variables
+            password=None,  # Use environment variables
+            start_date=datetime.now().strftime('%Y-%m-%d'),
+            end_date=datetime.now().strftime('%Y-%m-%d')
+        )
+        
+        if result:
+            logger.info("Test run completed successfully")
+            return True
+        else:
+            logger.error("Test run failed")
+            return False
+    except Exception as e:
+        logger.error(f"Error during test run: {str(e)}")
+        return False
+
 def is_time_to_run(target_hour, target_minute, last_run_time):
     """Check if it's time to run based on target time and last run"""
     eastern = pytz.timezone('US/Eastern')
@@ -201,6 +226,11 @@ def trigger_run(run_type):
     })
 
 if __name__ == '__main__':
+    # Perform a test run when the service first starts
+    logger.info("Web service starting up - performing initial test run...")
+    perform_test_run()
+    logger.info("Initial test run complete, starting scheduler...")
+    
     # Start the scheduler in a background thread
     scheduler = threading.Thread(target=scheduler_thread)
     scheduler.daemon = True
@@ -208,4 +238,4 @@ if __name__ == '__main__':
     
     # Start the web server
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port) 
