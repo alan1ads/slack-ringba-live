@@ -63,15 +63,20 @@ RUN mkdir -p data screenshots
 # Set environment variables
 ENV USE_HEADLESS=true
 ENV PYTHONUNBUFFERED=true
-# Simpler Chrome options for greater stability
-ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu"
+
+# Ultra basic Chrome options for maximum stability
+ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage"
+
+# Add memory settings
+ENV NODE_OPTIONS="--max-old-space-size=8192"
+ENV PYTHONIOENCODING=UTF-8
+
+# Set shared memory size (crucial for Chrome stability)
+RUN echo "tmpfs /dev/shm tmpfs defaults,size=2g 0 0" >> /etc/fstab
+
+# Add needed environment variables
 ENV PORT=8080
 ENV PATH="/usr/local/bin:/usr/bin:${PATH}"
-# Increase memory allocation
-ENV NODE_OPTIONS="--max-old-space-size=8192"
-# Add shared memory size for Chrome
-ENV CHROME_SHIM_ARGS="--shm-size=2gb"
-ENV PYTHONIOENCODING=UTF-8
 
 # Expose the port for the web service
 EXPOSE 8080

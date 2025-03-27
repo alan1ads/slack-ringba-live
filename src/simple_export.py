@@ -26,20 +26,30 @@ import pandas as pd
 import threading
 import signal
 import pickle
+import requests
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
+# Configure logger
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('simple_export.log')
-    ]
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
 )
-logger = logging.getLogger('simple_export')
+logger = logging.getLogger(__name__)
+
+# Get configuration from environment variables
+RINGBA_USERNAME = os.getenv('RINGBA_USERNAME')
+RINGBA_PASSWORD = os.getenv('RINGBA_PASSWORD')
+RINGBA_API_TOKEN = os.getenv('RINGBA_API_TOKEN')
+RINGBA_ACCOUNT_ID = os.getenv('RINGBA_ACCOUNT_ID')
+SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL')
+USE_HEADLESS = os.getenv('USE_HEADLESS', 'true').lower() == 'true'
+RPC_THRESHOLD = float(os.getenv('RPC_THRESHOLD', '12.0'))
+MORNING_CHECK_TIME = os.getenv('MORNING_CHECK_TIME', '11:00')
+MIDDAY_CHECK_TIME = os.getenv('MIDDAY_CHECK_TIME', '14:00')
+AFTERNOON_CHECK_TIME = os.getenv('AFTERNOON_CHECK_TIME', '16:30')
 
 # Create screenshots directory if it doesn't exist
 screenshots_dir = "screenshots"
@@ -76,7 +86,6 @@ def take_screenshot(browser, name):
                 """)
                 
                 # Save the Base64 image
-                import base64
                 with open(filename, 'wb') as f:
                     f.write(base64.b64decode(screenshot.split(',')[1]))
                     
@@ -126,410 +135,94 @@ def debug_environment():
     except Exception as e:
         logger.error(f"Error during environment debugging: {str(e)}")
 
-def setup_chrome():
-    """Set up Chrome with appropriate options"""
+def setup_browser():
+    """Set up the Chrome browser with appropriate options"""
     try:
-        # Print debugging information in Render environment
-        if os.getenv('PORT'):  # Check if running on Render
-            debug_environment()
+        chrome_options = webdriver.ChromeOptions()
         
-        logger.info("Running in headless mode")
-        chrome_options = Options()
-        
-        # Get Chrome options from environment
-        chrome_options_str = os.getenv('CHROME_OPTIONS', '')
-        if chrome_options_str:
-            logger.info(f"Adding Chrome options from environment: {chrome_options_str}")
-            for option in chrome_options_str.split():
-                chrome_options.add_argument(option)
-        
-        # Add enhanced stability options for containerized environment
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-software-rasterizer')
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-infobars')
-        chrome_options.add_argument('--disable-notifications')
-        chrome_options.add_argument('--disable-features=VizDisplayCompositor')
-        chrome_options.add_argument('--disable-features=NetworkService')
-        chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('--start-maximized')
-        chrome_options.add_argument('--ignore-certificate-errors')
-        chrome_options.add_argument('--disable-popup-blocking')
-        
-        # Add memory options to prevent crashes
-        chrome_options.add_argument('--js-flags=--max-old-space-size=4096')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-hang-monitor')
-        chrome_options.add_argument('--disable-crash-reporter')
-        
-        # Add experimental options
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        
-        # Set page load strategy to eager
-        chrome_options.page_load_strategy = 'eager'
-        
-        # Add preferences for downloads
+        # Get Chrome options from environment variable or use defaults
+        chrome_options_str = os.getenv('CHROME_OPTIONS', '--headless=new --no-sandbox --disable-dev-shm-usage')
+        for option in chrome_options_str.split():
+            chrome_options.add_argument(option.strip())
+            
+        # Set download directory
+        download_dir = os.path.abspath(os.getcwd())
         prefs = {
-            "download.default_directory": os.path.abspath(os.getcwd()),
+            "download.default_directory": download_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
-            "safebrowsing.enabled": False,
-            "credentials_enable_service": True,
-            "profile.password_manager_enabled": True
+            "safebrowsing.enabled": False
         }
         chrome_options.add_experimental_option("prefs", prefs)
         
-        # Explicitly set the path on Render environment - first priority
-        chromedriver_path = "/usr/local/bin/chromedriver"
-        if os.path.exists(chromedriver_path):
-            logger.info(f"Found ChromeDriver at {chromedriver_path}")
-            try:
-                service = Service(executable_path=chromedriver_path)
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-                logger.info("Successfully created Chrome driver with explicit path")
-                return driver
-            except Exception as e:
-                logger.warning(f"Explicit path ChromeDriver failed: {str(e)}")
+        logger.info(f"Setting up Chrome with options: {chrome_options_str}")
+        browser = webdriver.Chrome(options=chrome_options)
         
-        # Try using system ChromeDriver next
-        try:
-            logger.info("Attempting to use system ChromeDriver...")
-            driver = webdriver.Chrome(options=chrome_options)
-            logger.info("Successfully created Chrome driver with system ChromeDriver")
-            return driver
-        except Exception as e:
-            logger.warning(f"System ChromeDriver failed: {str(e)}")
+        # Set timeout
+        browser.set_page_load_timeout(60)
+        browser.implicitly_wait(10)
         
-        # Try WebDriverManager as fallback
-        try:
-            logger.info("Trying WebDriverManager approach...")
-            logger.info("====== WebDriver manager ======")
-            driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=chrome_options
-            )
-            logger.info("Successfully created Chrome driver with WebDriverManager")
-            return driver
-        except Exception as e:
-            logger.error(f"WebDriverManager setup failed: {str(e)}")
+        # Set window size
+        browser.set_window_size(1920, 1080)
         
-        # Try absolute minimal setup as last resort
-        try:
-            logger.info("Trying absolute minimal Chrome setup...")
-            driver = webdriver.Chrome(options=chrome_options)
-            logger.info("Successfully created Chrome driver with minimal setup")
-            return driver
-        except Exception as e:
-            logger.error(f"Minimal setup failed: {str(e)}")
-            # Dump PATH environment variable for debugging
-            logger.error(f"PATH environment: {os.environ.get('PATH', 'Not set')}")
-            # Try to find chromedriver with 'which'
-            try:
-                import subprocess
-                which_result = subprocess.run(['which', 'chromedriver'], capture_output=True, text=True)
-                logger.info(f"which chromedriver result: {which_result.stdout.strip()}")
-            except Exception as we:
-                logger.error(f"Failed to run 'which chromedriver': {str(we)}")
-        
-        raise Exception("All browser setup attempts failed")
+        logger.info("Chrome browser set up successfully")
+        return browser
     except Exception as e:
-        logger.error(f"Failed to set up Chrome: {str(e)}")
-        raise
+        logger.error(f"Failed to set up browser: {str(e)}")
+        return None
 
-def login_to_ringba(browser, username=None, password=None):
-    """Login to Ringba with credentials"""
+def login_to_ringba(browser):
+    """Login to Ringba dashboard"""
     try:
-        # Get credentials from environment variables if not provided
-        if not username:
-            username = os.getenv("RINGBA_USERNAME")
-        if not password:
-            password = os.getenv("RINGBA_PASSWORD")
-            
-        if not username or not password:
-            logger.error("Missing username or password. Set RINGBA_USERNAME and RINGBA_PASSWORD environment variables.")
-            return False
-            
         # Navigate to login page
-        logger.info("Navigating to Ringba login page")
+        logger.info("Navigating to Ringba login page...")
         browser.get("https://app.ringba.com/#/login")
+        time.sleep(5)  # Wait for page to load
         
-        # Take screenshot before login
-        take_screenshot(browser, "before_login")
+        # Enter username and password
+        logger.info("Entering login credentials...")
+        username_input = browser.find_element(By.ID, "mat-input-0")
+        password_input = browser.find_element(By.ID, "mat-input-1")
         
-        # Wait for login page elements with increased timeout
-        logger.info("Waiting for login page to load...")
+        username_input.send_keys(RINGBA_USERNAME)
+        password_input.send_keys(RINGBA_PASSWORD)
         
-        # Try different selectors for the login form
-        selectors = [
-            (By.ID, "username"),
-            (By.NAME, "username"),
-            (By.CSS_SELECTOR, "input[type='email']"),
-            (By.CSS_SELECTOR, "input[type='text']")
-        ]
+        # Click login button
+        login_button = browser.find_element(By.XPATH, "//button[@type='submit']")
+        login_button.click()
         
-        username_field = None
-        for selector_type, selector_value in selectors:
-            try:
-                WebDriverWait(browser, 10).until(
-                    EC.presence_of_element_located((selector_type, selector_value))
-                )
-                username_field = browser.find_element(selector_type, selector_value)
-                logger.info(f"Found username field with selector: {selector_type}={selector_value}")
-                break
-            except:
-                continue
-        
-        if not username_field:
-            logger.error("Could not find username field")
-            take_screenshot(browser, "username_field_not_found")
-            return False
-            
-        # Clear and enter username
-        logger.info(f"Entering username: {username}")
-        username_field.clear()
-        username_field.send_keys(username)
-        time.sleep(1)
-        
-        # Find password field - it's usually the next input
-        password_selectors = [
-            (By.ID, "password"),
-            (By.NAME, "password"),
-            (By.CSS_SELECTOR, "input[type='password']")
-        ]
-        
-        password_field = None
-        for selector_type, selector_value in password_selectors:
-            try:
-                WebDriverWait(browser, 10).until(
-                    EC.presence_of_element_located((selector_type, selector_value))
-                )
-                password_field = browser.find_element(selector_type, selector_value)
-                logger.info(f"Found password field with selector: {selector_type}={selector_value}")
-                break
-            except:
-                continue
-                
-        if not password_field:
-            logger.error("Could not find password field")
-            take_screenshot(browser, "password_field_not_found")
-            return False
-        
-        # Clear and enter password
-        logger.info("Entering password...")
-        password_field.clear()
-        password_field.send_keys(password)
-        time.sleep(1)
-        
-        # Take screenshot before clicking login
-        take_screenshot(browser, "before_clicking_login")
-        
-        # Try different methods to find and click login button
-        login_button = None
-        login_selectors = [
-            (By.CSS_SELECTOR, "button[type='submit']"),
-            (By.CSS_SELECTOR, ".login-btn"),
-            (By.CSS_SELECTOR, "button.btn-primary"),
-            (By.XPATH, "//button[contains(text(), 'Login')]"),
-            (By.XPATH, "//button[contains(text(), 'Sign In')]")
-        ]
-        
-        for selector_type, selector_value in login_selectors:
-            try:
-                WebDriverWait(browser, 10).until(
-                    EC.element_to_be_clickable((selector_type, selector_value))
-                )
-                login_button = browser.find_element(selector_type, selector_value)
-                logger.info(f"Found login button with selector: {selector_type}={selector_value}")
-                break
-            except:
-                continue
-                
-        if not login_button:
-            logger.warning("Could not find login button with conventional selectors")
-            # Try submitting the form by pressing Enter on the password field
-            logger.info("Trying to submit by pressing Enter on password field")
-            password_field.send_keys(Keys.RETURN)
-        else:
-            logger.info("Clicking login button...")
-            login_button.click()
-        
-        # Take screenshot after clicking login
-        time.sleep(3)
-        take_screenshot(browser, "after_clicking_login")
-        
-        # Wait for dashboard to load with longer timeout
-        logger.info("Waiting for dashboard to load...")
-        
-        # Wait for indicators of successful login
-        dashboard_selectors = [
-            (By.ID, "main-content"),
-            (By.CSS_SELECTOR, ".page-content"),
-            (By.CSS_SELECTOR, ".navbar-nav")
-        ]
-        
-        dashboard_loaded = False
-        for selector_type, selector_value in dashboard_selectors:
-            try:
-                WebDriverWait(browser, 90).until(
-                    EC.presence_of_element_located((selector_type, selector_value))
-                )
-                logger.info(f"Dashboard detected with selector: {selector_type}={selector_value}")
-                dashboard_loaded = True
-                break
-            except:
-                continue
-                
-        if not dashboard_loaded:
-            logger.error("Dashboard did not load after login")
-            take_screenshot(browser, "dashboard_not_loaded")
-            return False
-        
-        # Explicitly wait to ensure page is fully loaded
-        time.sleep(5)
-        take_screenshot(browser, "after_login_success")
+        # Wait for login to complete
+        logger.info("Waiting for login to complete...")
+        wait = WebDriverWait(browser, 30)
+        wait.until(EC.url_contains("dashboard"))
         
         logger.info("Successfully logged in to Ringba")
         return True
     except Exception as e:
-        logger.error(f"Failed to log in to Ringba: {str(e)}")
-        take_screenshot(browser, "login_exception")
+        logger.error(f"Failed to login to Ringba: {str(e)}")
         return False
 
 def navigate_to_call_logs(browser):
-    """Navigate to call logs page"""
-    max_retries = 3
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            # Set a strict overall timeout for this entire function
-            start_time = time.time()
-            max_wait_time = 120  # Maximum 2 minutes for the entire page load process
-            
-            # Navigate to call logs
-            call_logs_url = "https://app.ringba.com/#/dashboard/call-logs/report/new"
-            logger.info(f"Navigating to call logs page: {call_logs_url}")
-            
-            try:
-                browser.get(call_logs_url)
-            except Exception as e:
-                logger.error(f"Error loading call logs page: {str(e)}")
-                # Try to refresh the page if there was an error
-                try:
-                    browser.refresh()
-                    time.sleep(5)
-                except:
-                    pass
-                
-                # Try direct navigation again
-                browser.get(call_logs_url)
-            
-            # Take screenshot if possible
-            try:
-                take_screenshot(browser, "after_navigation_to_call_logs")
-            except Exception as ss_error:
-                logger.error(f"Failed to take screenshot: {str(ss_error)}")
-            
-            # Wait for call logs page to load with multiple selectors
-            logger.info("Waiting for call logs page to load...")
-            
-            # Try looking for any of these selectors
-            call_logs_selectors = [
-                (By.CSS_SELECTOR, ".reporting-call-logs-data"),
-                (By.CSS_SELECTOR, ".page-content"),
-                (By.XPATH, "//h1[contains(text(), 'Call Logs')]"),
-                (By.CSS_SELECTOR, ".call-logs-container"),
-                # Add more general selectors that might be present
-                (By.CSS_SELECTOR, ".navbar-nav"),
-                (By.CSS_SELECTOR, "button"),
-                (By.CSS_SELECTOR, ".btn"),
-                (By.TAG_NAME, "table")
-            ]
-            
-            page_loaded = False
-            selector_wait_timeout = 15  # Each selector gets max 15 seconds
-            
-            for selector_type, selector_value in call_logs_selectors:
-                # Check if we've exceeded the overall timeout
-                if time.time() - start_time > max_wait_time:
-                    logger.warning(f"Overall timeout of {max_wait_time} seconds exceeded, proceeding anyway")
-                    page_loaded = True  # Force proceed
-                    break
-                
-                try:
-                    logger.info(f"Trying selector: {selector_type}={selector_value}")
-                    WebDriverWait(browser, selector_wait_timeout).until(
-                        EC.presence_of_element_located((selector_type, selector_value))
-                    )
-                    logger.info(f"Call logs page detected with selector: {selector_type}={selector_value}")
-                    page_loaded = True
-                    break
-                except Exception as wait_error:
-                    logger.warning(f"Selector {selector_type}={selector_value} not found: {str(wait_error)}")
-                    continue
-            
-            # If we're past the overall timeout, proceed anyway
-            if time.time() - start_time > max_wait_time:
-                logger.warning(f"Overall timeout of {max_wait_time} seconds exceeded, proceeding anyway")
-                page_loaded = True
-                
-            if not page_loaded:
-                # If we've reached max retries, but let's proceed anyway as a last resort
-                if retry_count >= max_retries - 1:
-                    logger.warning("Call logs page did not load, but proceeding anyway as last resort")
-                    # Try to take a screenshot to see current state
-                    try:
-                        take_screenshot(browser, "call_logs_page_not_fully_loaded")
-                    except:
-                        pass
-                    return True  # Return True to continue with export
-                
-                # Otherwise, increment retry counter and try again
-                retry_count += 1
-                logger.warning(f"Call logs page not loaded, retrying ({retry_count}/{max_retries})...")
-                time.sleep(5)
-                continue
-            
-            # Wait a bit longer after the page appears to be loaded
-            logger.info("Page appears to be loaded, waiting 5 seconds for it to stabilize")
-            time.sleep(5)
-            
-            # Take screenshot after page loads
-            try:
-                take_screenshot(browser, "call_logs_page_loaded")
-            except Exception as ss_error:
-                logger.error(f"Failed to take screenshot: {str(ss_error)}")
-            
+    """Navigate to Call Logs page"""
+    try:
+        # Directly navigate to the Call Logs URL
+        logger.info("Navigating directly to call logs report...")
+        browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
+        
+        # Wait for page to load
+        logger.info("Waiting for call logs page to load...")
+        time.sleep(10)
+        
+        # Check if we're on the right page
+        if "call-logs" in browser.current_url:
             logger.info("Successfully navigated to call logs page")
             return True
-        
-        except Exception as e:
-            retry_count += 1
-            logger.error(f"Navigation error (attempt {retry_count}/{max_retries}): {str(e)}")
-            
-            # If we've reached max retries, proceed anyway as a last resort
-            if retry_count >= max_retries:
-                logger.warning("Failed to navigate to call logs properly after multiple attempts, but proceeding anyway")
-                return True  # Return True to try export anyway
-            
-            # Restart the browser if navigation fails
-            try:
-                browser.quit()
-            except:
-                pass
-            
-            logger.info("Restarting browser...")
-            browser = setup_chrome()
-            
-            # Re-login if we had to restart the browser
-            if not login_to_ringba(browser):
-                logger.error("Login failed after browser restart. Aborting navigation.")
-                return False
-            
-            time.sleep(5)  # Wait before retrying
+        else:
+            logger.error(f"Failed to navigate to call logs page. Current URL: {browser.current_url}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to navigate to call logs page: {str(e)}")
+        return False
 
 def set_date_range(browser, start_date, end_date):
     """Set the date range for call logs"""
@@ -541,116 +234,50 @@ def set_date_range(browser, start_date, end_date):
 def click_export_csv(browser):
     """Click the Export CSV button and download the file"""
     try:
-        # Set a timeout for this entire function
-        start_time = time.time()
-        max_wait_time = 60  # Maximum 60 seconds for the entire process
-        
-        # Give the page time to fully load
-        logger.info("Waiting 5 seconds for page to stabilize...")
-        time.sleep(5)
-        
-        # Scroll to make sure all elements are visible
-        browser.execute_script("window.scrollTo(0, 0);")
-        browser.execute_script("window.scrollTo(0, document.body.scrollHeight/4);")
-        browser.execute_script("window.scrollTo(0, 0);")
-        
-        # Take a screenshot to see what we're working with
+        # Navigate directly to the summary page with export option
+        logger.info("Navigating directly to call summary report...")
         try:
-            take_screenshot(browser, "before_export_button_search")
-        except Exception as ss_err:
-            logger.warning(f"Failed to take screenshot: {ss_err}")
+            browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
+            time.sleep(10)  # Give page time to load
+        except Exception as e:
+            logger.error(f"Failed to navigate to summary page: {str(e)}")
+            
+        # Ultra simple approach - click EXPORT CSV via text content
+        logger.info("Trying direct approach to find EXPORT CSV button...")
         
-        # Try the simplest approach first - click via JavaScript using button text
-        logger.info("Trying to find export button via JavaScript")
         try:
-            found = browser.execute_script("""
-                var buttons = Array.from(document.querySelectorAll('button, a'));
-                
-                // Sort by likelihood of being the export button
-                buttons.sort(function(a, b) {
-                    var aText = a.textContent.toLowerCase();
-                    var bText = b.textContent.toLowerCase();
-                    
-                    var aScore = 0;
-                    var bScore = 0;
-                    
-                    // Check for the word "export"
-                    if (aText.includes('export')) aScore += 10;
-                    if (bText.includes('export')) bScore += 10;
-                    
-                    // Check for "csv"
-                    if (aText.includes('csv')) aScore += 5;
-                    if (bText.includes('csv')) bScore += 5;
-                    
-                    // Check for "download"
-                    if (aText.includes('download')) aScore += 3;
-                    if (bText.includes('download')) bScore += 3;
-                    
-                    return bScore - aScore;
+            # Simple JS to find and click the button
+            result = browser.execute_script("""
+                // Find all buttons/spans that contain 'export' or 'csv'
+                var buttons = [];
+                document.querySelectorAll('button, span, a, div').forEach(function(el) {
+                    if (el.textContent && 
+                        (el.textContent.toLowerCase().includes('export') || 
+                         el.textContent.toLowerCase().includes('csv'))) {
+                        buttons.push(el);
+                    }
                 });
                 
-                // Try clicking the most likely buttons
-                for (var i = 0; i < Math.min(buttons.length, 5); i++) {
-                    try {
-                        console.log("Trying to click: " + buttons[i].textContent);
-                        buttons[i].click();
-                        return true;
-                    } catch(e) {
-                        console.log("Failed to click button " + i + ": " + e);
-                    }
+                // If found any, click the first one
+                if (buttons.length > 0) {
+                    console.log("Found " + buttons.length + " potential export buttons");
+                    buttons[0].click();
+                    return true;
                 }
                 
                 return false;
             """)
             
-            if found:
-                logger.info("Successfully clicked export button via JavaScript")
+            if result:
+                logger.info("Successfully clicked export button")
+                time.sleep(15)  # Wait for download to start
             else:
-                logger.warning("Could not find or click export button via JavaScript")
-                
-                # Fallback to direct selectors
-                export_selectors = [
-                    "button.export-summary-btn",
-                    ".export-summary-btn",
-                    ".export-csv",
-                    "button.btn-primary",
-                    "button.btn.btn-primary"
-                ]
-                
-                for selector in export_selectors:
-                    try:
-                        logger.info(f"Trying selector: {selector}")
-                        elements = browser.find_elements(By.CSS_SELECTOR, selector)
-                        if elements:
-                            logger.info(f"Found {len(elements)} elements with selector: {selector}")
-                            for element in elements:
-                                try:
-                                    # Try with normal click
-                                    element.click()
-                                    logger.info(f"Clicked element with selector: {selector}")
-                                    found = True
-                                    break
-                                except:
-                                    # Try with JavaScript click
-                                    try:
-                                        logger.info("Trying JavaScript click")
-                                        browser.execute_script("arguments[0].click();", element)
-                                        logger.info(f"Clicked element with selector via JavaScript: {selector}")
-                                        found = True
-                                        break
-                                    except:
-                                        continue
-                    except Exception as e:
-                        logger.warning(f"Error with selector {selector}: {str(e)}")
-                    
-                    if found:
-                        break
-        except Exception as js_error:
-            logger.warning(f"JavaScript approach failed: {str(js_error)}")
-            found = False
+                logger.warning("Could not find export button via text content")
+        except Exception as e:
+            logger.error(f"Error clicking export button: {str(e)}")
         
-        # Wait for download regardless of whether we think we clicked successfully
-        logger.info("Waiting 30 seconds for any download to complete...")
+        # Wait for download to complete
+        logger.info("Waiting for download to complete...")
         time.sleep(30)
         
         # Look for any CSV files
@@ -658,174 +285,198 @@ def click_export_csv(browser):
         csv_files = [f for f in os.listdir(download_dir) if f.endswith('.csv')]
         
         if csv_files:
-            logger.info(f"Found CSV files in directory: {csv_files}")
-            logger.info("Assuming download completed successfully")
-            return True
-        else:
-            logger.warning("No CSV files found after waiting")
-            # Still return True to continue processing existing files if any
-            return True
+            # Sort by creation time
+            csv_files.sort(key=lambda x: os.path.getctime(os.path.join(download_dir, x)), reverse=True)
+            latest_csv = csv_files[0]
+            logger.info(f"Found latest CSV file: {latest_csv}")
+            
+            # Check if it's a newly created file (within last minute)
+            file_path = os.path.join(download_dir, latest_csv)
+            file_creation_time = os.path.getctime(file_path)
+            current_time = time.time()
+            
+            if current_time - file_creation_time < 120:  # 2 minutes
+                logger.info(f"Using newly created CSV file: {latest_csv}")
+                return file_path
+            else:
+                logger.warning(f"CSV file {latest_csv} is not recent (created {(current_time - file_creation_time)/60:.1f} minutes ago)")
+                
+        # Return the most recent CSV file even if it's old
+        if csv_files:
+            latest_csv = csv_files[0]
+            logger.info(f"Using existing CSV file as fallback: {latest_csv}")
+            return os.path.join(download_dir, latest_csv)
+            
+        logger.warning("No CSV files found after waiting")
+        return None
             
     except Exception as e:
         logger.error(f"Failed to export CSV: {str(e)}")
-        # Always continue even if we encounter errors
-        return True
+        return None
 
 def process_csv_file(file_path):
-    """Process the downloaded CSV file to find targets with RPC above threshold"""
+    """Process the CSV file to extract targets with low RPC"""
+    if not file_path or not os.path.exists(file_path):
+        logger.error(f"CSV file not found at path: {file_path}")
+        return None
+        
     logger.info(f"Processing CSV file: {file_path}")
     
     try:
-        # Read CSV file
+        # Read the CSV file
         df = pd.read_csv(file_path)
-        logger.info(f"CSV file loaded with {len(df)} rows")
-        logger.info(f"Available columns: {df.columns.tolist()}")
         
-        # Possible column names for RPC and Campaign/Target
-        possible_rpc_columns = ['RPC', 'rpc', 'Revenue Per Call', 'revenue_per_call']
-        possible_target_columns = ['Campaign', 'Campaign Name', 'Target', 'target', 'campaign', 'campaign_name']
+        # Log the columns for debugging
+        logger.info(f"CSV columns: {', '.join(df.columns)}")
         
-        # Find actual column names
-        rpc_col = next((col for col in possible_rpc_columns if col in df.columns), None)
-        target_col = next((col for col in possible_target_columns if col in df.columns), None)
+        # Look for relevant columns
+        target_col = None
+        rpc_col = None
         
-        if not rpc_col:
-            logger.error("RPC column not found in CSV")
-            return False
-            
+        # Try different potential column names for target
+        for col in ['Target Name', 'Target', 'TargetName', 'Campaign']:
+            if col in df.columns:
+                target_col = col
+                break
+                
+        # Try different potential column names for RPC
+        for col in ['RPC', 'Avg. Revenue per Call', 'Revenue Per Call', 'Revenue per Call', 'RPCall']:
+            if col in df.columns:
+                rpc_col = col
+                break
+        
         if not target_col:
-            logger.error("Target/Campaign column not found in CSV")
-            return False
+            logger.error("Could not find Target column in CSV")
+            return None
             
-        logger.info(f"Using columns: RPC={rpc_col}, Target/Campaign={target_col}")
+        if not rpc_col:
+            logger.error("Could not find RPC column in CSV")
+            return None
+            
+        logger.info(f"Using columns: Target={target_col}, RPC={rpc_col}")
+        
+        # Convert RPC column to numeric, handling currency symbols and commas
+        df[rpc_col] = df[rpc_col].replace('[\$,]', '', regex=True).astype(float)
         
         # Get threshold from environment variable or use default
         rpc_threshold = float(os.getenv('RPC_THRESHOLD', 12.0))
-        logger.info(f"Using RPC threshold: {rpc_threshold}")
+        logger.info(f"Using RPC threshold of ${rpc_threshold}")
         
-        # Ensure RPC column is numeric
-        df[rpc_col] = pd.to_numeric(df[rpc_col], errors='coerce')
-        df = df.dropna(subset=[rpc_col])
+        # Filter for targets below the threshold
+        low_rpc_targets = df[df[rpc_col] < rpc_threshold][[target_col, rpc_col]].copy()
         
-        # Find targets that meet the RPC threshold
-        targets = df[df[rpc_col] >= rpc_threshold]
-        logger.info(f"Found {len(targets)} targets meeting RPC threshold")
+        # Sort by RPC (ascending)
+        low_rpc_targets = low_rpc_targets.sort_values(by=rpc_col)
         
-        # Log the targets
-        for index, row in targets.iterrows():
-            logger.info(f"Target: {row[target_col]}, RPC: {row[rpc_col]:.2f}")
-        
-        # Save processed results
-        results_path = os.path.join(os.path.dirname(file_path), "processed_results.csv")
-        targets.to_csv(results_path, index=False)
-        logger.info(f"Saved processed results to {results_path}")
-        
-        # Return the targets dataframe and column names for further processing
-        return targets, target_col, rpc_col
+        # Log the results
+        if not low_rpc_targets.empty:
+            logger.info(f"Found {len(low_rpc_targets)} targets below the RPC threshold:")
+            for index, row in low_rpc_targets.iterrows():
+                logger.info(f"  {row[target_col]}: ${row[rpc_col]:.2f}")
+            
+            return {
+                'targets': low_rpc_targets.to_dict('records'),
+                'target_col': target_col,
+                'rpc_col': rpc_col,
+                'threshold': rpc_threshold
+            }
+        else:
+            logger.info("No targets found below the RPC threshold")
+            return None
+            
     except Exception as e:
         logger.error(f"Error processing CSV file: {str(e)}")
         return None
 
-def send_results_to_slack(targets_df, target_col, rpc_col, run_label=''):
-    """Send the processing results to Slack webhook"""
-    import requests
-    
+def check_time_range(current_time, target_time, window_minutes=30):
+    """Check if current time is within window_minutes of target time"""
     try:
-        webhook_url = os.getenv('SLACK_WEBHOOK_URL')
-        if not webhook_url:
-            logger.error("Slack webhook URL not configured, skipping notification")
-            return False
+        # Parse times
+        current_hour, current_minute = map(int, current_time.split(':'))
+        target_hour, target_minute = map(int, target_time.split(':'))
         
-        # Get RPC threshold from environment
-        rpc_threshold = float(os.getenv('RPC_THRESHOLD', '12.0'))
+        # Convert to minutes
+        current_minutes = current_hour * 60 + current_minute
+        target_minutes = target_hour * 60 + target_minute
         
-        # Format the date for display
-        today = datetime.now().strftime('%Y-%m-%d')
+        # Check if within window
+        return abs(current_minutes - target_minutes) <= window_minutes
+    except Exception as e:
+        logger.error(f"Error checking time range: {str(e)}")
+        return False
+
+def send_to_slack(data, run_type):
+    """Send notification to Slack with targets below RPC threshold"""
+    if not data or 'targets' not in data or not data['targets']:
+        logger.warning("No data to send to Slack")
+        return False
         
-        # Get targets BELOW the RPC threshold - changed to show low RPC targets
-        low_rpc_targets = targets_df[targets_df[rpc_col] < rpc_threshold]
-        target_count = len(low_rpc_targets)
+    webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+    if not webhook_url:
+        logger.error("SLACK_WEBHOOK_URL environment variable not set")
+        return False
         
-        # Format run time based on label or current time
-        if run_label:
-            run_time_label = f"*{run_label.upper()} RUN*"
-        else:
-            # Use current time if no label
-            current_time = datetime.now().strftime('%I:%M %p')
-            run_time_label = f"*{current_time}*"
+    try:
+        # Extract data
+        targets = data['targets']
+        target_col = data['target_col']
+        rpc_col = data['rpc_col']
+        threshold = data['threshold']
         
-        # Create the message
+        # Create message
         message = {
             "blocks": [
                 {
                     "type": "header",
                     "text": {
                         "type": "plain_text",
-                        "text": f"Ringba RPC Report - {today} {run_time_label}",
-                        "emoji": True
+                        "text": f"{run_type} Report: Targets Below ${threshold} RPC"
                     }
                 },
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"Found *{target_count}* targets with RPC < {rpc_threshold} 📉"
+                        "text": f"*{len(targets)} targets* found below the RPC threshold"
                     }
+                },
+                {
+                    "type": "divider"
                 }
             ]
         }
         
-        # Add targets to message
-        if not low_rpc_targets.empty:
-            target_list = ""
-            for _, row in low_rpc_targets.iterrows():
-                target_name = row[target_col] if not pd.isna(row[target_col]) else "Total RPC (including the ones below $12)"
-                
-                target_list += f"• *{target_name}*: RPC = {row[rpc_col]:.2f}\n"
+        # Add targets to message in chunks (to avoid message size limits)
+        target_texts = []
+        for target in targets:
+            target_name = target[target_col]
+            target_rpc = target[rpc_col]
+            target_texts.append(f"• *{target_name}*: ${target_rpc:.2f}")
             
+        # Split into chunks of 20 targets
+        chunk_size = 20
+        for i in range(0, len(target_texts), chunk_size):
+            chunk = target_texts[i:i+chunk_size]
             message["blocks"].append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": target_list
+                    "text": "\n".join(chunk)
                 }
             })
-        else:
-            message["blocks"].append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "🎉 Great news! No targets below RPC threshold."
-                }
-            })
-        
-        # Add footer
-        message["blocks"].append({
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"Data from Ringba for {today}"
-                }
-            ]
-        })
-        
-        # Send the message
-        response = requests.post(
-            webhook_url,
-            json=message,
-            headers={'Content-Type': 'application/json'}
-        )
+            
+        # Send to Slack
+        response = requests.post(webhook_url, json=message)
         
         if response.status_code == 200:
-            logger.info("Results sent to Slack successfully")
+            logger.info(f"Successfully sent {run_type} report to Slack")
             return True
         else:
-            logger.error(f"Failed to send results to Slack: {response.status_code} {response.text}")
+            logger.error(f"Failed to send to Slack: {response.status_code} {response.text}")
             return False
             
     except Exception as e:
-        logger.error(f"Error sending results to Slack: {str(e)}")
+        logger.error(f"Error sending to Slack: {str(e)}")
         return False
 
 def save_morning_results(targets_df, target_col, rpc_col):
@@ -1361,152 +1012,71 @@ def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_n
         logger.error(f"Error sending afternoon comparison results to Slack: {str(e)}")
         return False
 
-def export_csv(username=None, password=None, start_date=None, end_date=None):
-    """Main function to export CSV data"""
-    # Set default dates if not provided
-    if not start_date:
-        # Default to TODAY instead of yesterday
-        today = datetime.now().strftime('%Y-%m-%d')
-        start_date = today
-    
-    if not end_date:
-        end_date = start_date
-    
-    logger.info(f"Starting CSV export for period {start_date} to {end_date}")
-    
-    # Determine run time based on current time in EST
-    eastern = pytz.timezone('US/Eastern')
-    current_time_est = datetime.now(pytz.utc).astimezone(eastern)
-    current_hour = current_time_est.hour
-    current_minute = current_time_est.minute
-    logger.info(f"Current time in EST: {current_time_est.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    
-    # Get the configured times for different runs
-    morning_time_str = os.getenv('MORNING_CHECK_TIME', '11:00')
-    midday_time_str = os.getenv('MIDDAY_CHECK_TIME', '14:00')
-    afternoon_time_str = os.getenv('AFTERNOON_CHECK_TIME', '16:30')
-    
-    # Parse time strings to hours and add debug logging
+def export_csv():
+    """Export CSV from Ringba and notify Slack for any targets with RPC below threshold"""
+    browser = None
     try:
-        morning_hour = int(morning_time_str.split(':')[0])
-        morning_minute = int(morning_time_str.split(':')[1]) if ':' in morning_time_str else 0
-        midday_hour = int(midday_time_str.split(':')[0])
-        midday_minute = int(midday_time_str.split(':')[1]) if ':' in midday_time_str else 0
-        afternoon_hour = int(afternoon_time_str.split(':')[0])
-        afternoon_minute = int(afternoon_time_str.split(':')[1]) if ':' in afternoon_time_str else 0
+        # Determine the current time in Eastern time
+        eastern_tz = pytz.timezone('America/New_York')
+        now = datetime.datetime.now(eastern_tz)
         
-        logger.info(f"Morning check time: {morning_hour}:{morning_minute:02d}")
-        logger.info(f"Midday check time: {midday_hour}:{midday_minute:02d}")
-        logger.info(f"Afternoon check time: {afternoon_hour}:{afternoon_minute:02d}")
-    except Exception as e:
-        logger.error(f"Error parsing time settings: {str(e)}")
-        # Fallback to default times
-        morning_hour, morning_minute = 11, 0
-        midday_hour, midday_minute = 14, 0
-        afternoon_hour, afternoon_minute = 16, 30
-        logger.info(f"Using fallback times: 11:00, 14:00, 16:30")
-    
-    # Determine run type based on current time with wider windows
-    is_morning_run = False
-    is_midday_run = False
-    is_afternoon_run = False
-    
-    # Use time windows instead of exact matches (30 minute window for each run)
-    time_now_minutes = current_hour * 60 + current_minute
-    morning_time_minutes = morning_hour * 60 + morning_minute
-    midday_time_minutes = midday_hour * 60 + midday_minute
-    afternoon_time_minutes = afternoon_hour * 60 + afternoon_minute
-    
-    if abs(time_now_minutes - morning_time_minutes) <= 30:
-        is_morning_run = True
-        logger.info(f"This is a morning run (current time {current_hour}:{current_minute:02d} within 30 min of {morning_hour}:{morning_minute:02d})")
-    elif abs(time_now_minutes - midday_time_minutes) <= 30:
-        is_midday_run = True
-        logger.info(f"This is a midday run (current time {current_hour}:{current_minute:02d} within 30 min of {midday_hour}:{midday_minute:02d})")
-    elif abs(time_now_minutes - afternoon_time_minutes) <= 30:
-        is_afternoon_run = True
-        logger.info(f"This is an afternoon run (current time {current_hour}:{current_minute:02d} within 30 min of {afternoon_hour}:{afternoon_minute:02d})")
-    else:
-        # Default to morning run behavior for manual runs
-        is_morning_run = True
-        logger.info(f"This is a manual run at {current_hour}:{current_minute:02d} (defaulting to morning run behavior)")
-    
-    browser = setup_chrome()
-    if not browser:
-        return False
-    
-    try:
-        # Login to Ringba
-        if not login_to_ringba(browser, username, password):
-            logger.error("Login failed. Aborting export.")
-            return False
+        # Format for checking times
+        current_time_str = now.strftime('%H:%M')
         
-        # Navigate to call logs
-        if not navigate_to_call_logs(browser):
-            return False
-        
-        # Set date range - even if this fails, we'll continue to try clicking Export CSV
-        set_date_range(browser, start_date, end_date)
-        
-        # Click Export CSV
-        if not click_export_csv(browser):
-            return False
-        
-        logger.info("CSV export process completed")
-        
-        # Find the most recently downloaded CSV file
-        download_dir = os.path.abspath(os.getcwd())
-        all_files = os.listdir(download_dir)
-        csv_files = [f for f in all_files if f.endswith('.csv')]
-        
-        if csv_files:
-            # Sort by creation time, newest first
-            csv_files.sort(key=lambda x: os.path.getctime(os.path.join(download_dir, x)), reverse=True)
-            latest_csv = csv_files[0]
-            csv_path = os.path.join(download_dir, latest_csv)
-            
-            logger.info(f"Processing the downloaded CSV file: {csv_path}")
-            result = process_csv_file(csv_path)
-            
-            if result:
-                # Unpack the targets dataframe and column names
-                targets_df, target_col, rpc_col = result
-                
-                # Based on the run type, perform different actions
-                if is_morning_run:
-                    # Morning run: just show targets below threshold
-                    logger.info("Processing morning run (11 AM ET)")
-                    send_results_to_slack(targets_df, target_col, rpc_col, run_label='morning')
-                    
-                elif is_midday_run:
-                    # Midday run: just show targets below threshold
-                    logger.info("Processing midday run (2 PM ET)")
-                    send_results_to_slack(targets_df, target_col, rpc_col, run_label='midday')
-                    
-                elif is_afternoon_run:
-                    # Afternoon run: just show targets below threshold
-                    logger.info("Processing afternoon run (4:30 PM ET)")
-                    send_results_to_slack(targets_df, target_col, rpc_col, run_label='afternoon')
-                
-                else:
-                    # Default behavior for manual runs
-                    logger.info("Processing manual run")
-                    send_results_to_slack(targets_df, target_col, rpc_col)
-            else:
-                logger.error("Failed to process CSV file")
+        # Determine which type of run this is based on time
+        if check_time_range(current_time_str, MORNING_CHECK_TIME):
+            logger.info("Processing morning run (11 AM ET)")
+            run_type = "Morning"
+        elif check_time_range(current_time_str, MIDDAY_CHECK_TIME):
+            logger.info("Processing midday run (2 PM ET)")
+            run_type = "Midday"
+        elif check_time_range(current_time_str, AFTERNOON_CHECK_TIME):
+            logger.info("Processing afternoon run (4:30 PM ET)")
+            run_type = "Afternoon"
         else:
-            logger.warning("No CSV files found to process")
+            run_type = "Manual"
+            logger.info(f"Processing manual run at {current_time_str} ET")
+            
+        # Start the browser
+        browser = setup_browser()
+        if not browser:
+            logger.error("Failed to set up browser")
+            return False
+
+        # Login to Ringba
+        if not login_to_ringba(browser):
+            logger.error("Failed to login to Ringba")
+            return False
+
+        # Navigate to Call Logs
+        if not navigate_to_call_logs(browser):
+            logger.error("Failed to navigate to Call Logs")
+            return False
+
+        # Click Export CSV
+        csv_file_path = click_export_csv(browser)
+        if not csv_file_path:
+            logger.error("Failed to export CSV file")
+            return False
+            
+        logger.info(f"Exported CSV file: {csv_file_path}")
+
+        # Process the CSV file
+        low_rpc_targets = process_csv_file(csv_file_path)
+        if not low_rpc_targets:
+            logger.info("No low RPC targets found")
+            return True
+
+        # Send to Slack
+        send_to_slack(low_rpc_targets, run_type)
         
         return True
     except Exception as e:
-        logger.error(f"Error during export: {str(e)}")
-        take_screenshot(browser, "export_process_exception")
+        logger.error(f"Failed to export CSV: {str(e)}")
         return False
     finally:
-        # For render.com deployment, don't wait for user input
-        # Just close the browser automatically
-        browser.quit()
-        logger.info("Browser closed automatically")
+        if browser:
+            browser.quit()
 
 def perform_test_run():
     """Perform a test run when the service is first deployed"""
@@ -1589,4 +1159,5 @@ if __name__ == "__main__":
         finally:
             # Cancel timer if script completes normally
             timer.cancel()
+            logger.info("Script execution complete") 
             logger.info("Script execution complete") 
