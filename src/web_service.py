@@ -41,13 +41,8 @@ def perform_test_run():
         # Set environment variable to identify this as a test run
         os.environ['RUN_LABEL'] = 'test'
         
-        # Run the export with today's date
-        result = export_csv(
-            username=None,  # Use environment variables
-            password=None,  # Use environment variables
-            start_date=datetime.now().strftime('%Y-%m-%d'),
-            end_date=datetime.now().strftime('%Y-%m-%d')
-        )
+        # Run the export with no parameters (uses environment variables)
+        result = export_csv()
         
         if result:
             logger.info("Test run completed successfully")
