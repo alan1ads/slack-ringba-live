@@ -89,104 +89,123 @@ def take_screenshot(browser, name):
         logger.error(f"Failed to take screenshot: {str(e)}")
         # Don't raise the exception, just log it
 
-def setup_browser():
-    """Set up and configure the browser for automation"""
-    
-    # Create a new Chrome browser instance
-    options = Options()
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--mute-audio")
-    
-    # Use headless mode based on environment variable (for render.com deployment)
-    use_headless = os.getenv("USE_HEADLESS", "false").lower() == "true"
-    if use_headless:
-        logger.info("Running in headless mode")
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1920,1080")
-        
-        # Additional flags for stability in Docker environments
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--remote-debugging-port=9222")
-        options.add_argument("--disable-web-security")
-        options.add_argument("--allow-running-insecure-content")
-    else:
-        logger.info("Running in visible mode")
-    
-    # Get additional Chrome options from environment if available
-    chrome_options_env = os.getenv("CHROME_OPTIONS", "")
-    if chrome_options_env:
-        logger.info(f"Adding Chrome options from environment: {chrome_options_env}")
-        for option in chrome_options_env.split():
-            if option and not option.isspace():
-                options.add_argument(option)
-    
-    # Disable automation flags to avoid detection
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    
-    # Set page load strategy to eager for faster loading
-    options.page_load_strategy = 'eager'
-    
-    # For render.com, ensure the download directory exists and is writable
-    download_dir = os.path.abspath(os.getcwd())
-    download_dir = os.getenv("DOWNLOAD_DIR", download_dir)
-    os.makedirs(download_dir, exist_ok=True)
-    
-    # Set up download directory to current folder
-    prefs = {
-        "download.default_directory": download_dir,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-        "safebrowsing.enabled": False,
-        "credentials_enable_service": True,
-        "profile.password_manager_enabled": True
-    }
-    options.add_experimental_option("prefs", prefs)
-    
-    # Try different strategies to set up browser
+def debug_environment():
+    """Print debugging information about the environment"""
     try:
-        # Skip WebDriverManager and go straight to the simplified approach
-        # This is more likely to work reliably in Docker environments
-        logger.info("Using direct Chrome setup (bypassing WebDriverManager)...")
-        browser = webdriver.Chrome(options=options)
-        logger.info("Direct Chrome setup successful")
+        logger.info("=== Environment Debug Information ===")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"PATH: {os.environ.get('PATH', 'Not set')}")
         
-        # Set page load timeout
-        browser.set_page_load_timeout(90)
-        return browser
-    except Exception as direct_error:
-        logger.error(f"Direct Chrome setup failed: {str(direct_error)}")
+        # Check for ChromeDriver in common locations
+        common_paths = [
+            "/usr/local/bin/chromedriver",
+            "/usr/bin/chromedriver",
+            "/snap/bin/chromedriver",
+            os.path.join(os.getcwd(), "chromedriver")
+        ]
         
-        # Try with WebDriverManager as fallback
+        for path in common_paths:
+            logger.info(f"Checking ChromeDriver at {path}: {os.path.exists(path)}")
+        
+        # Try to run chromedriver --version
+        try:
+            import subprocess
+            version_cmd = subprocess.run(['chromedriver', '--version'], capture_output=True, text=True)
+            logger.info(f"ChromeDriver version: {version_cmd.stdout.strip()}")
+        except Exception as e:
+            logger.warning(f"Failed to get ChromeDriver version: {str(e)}")
+        
+        # Check Chrome version
+        try:
+            chrome_cmd = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
+            logger.info(f"Chrome version: {chrome_cmd.stdout.strip()}")
+        except Exception as e:
+            logger.warning(f"Failed to get Chrome version: {str(e)}")
+        
+        logger.info("=== End Environment Debug ===")
+    except Exception as e:
+        logger.error(f"Error during environment debugging: {str(e)}")
+
+def setup_chrome():
+    """Set up Chrome with appropriate options"""
+    try:
+        # Print debugging information in Render environment
+        if os.getenv('PORT'):  # Check if running on Render
+            debug_environment()
+        
+        logger.info("Running in headless mode")
+        chrome_options = Options()
+        
+        # Get Chrome options from environment
+        chrome_options_str = os.getenv('CHROME_OPTIONS', '')
+        if chrome_options_str:
+            logger.info(f"Adding Chrome options from environment: {chrome_options_str}")
+            for option in chrome_options_str.split():
+                chrome_options.add_argument(option)
+        
+        # Add additional options for Render environment
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-software-rasterizer')
+        chrome_options.add_argument('--disable-extensions')
+        
+        # Explicitly set the path on Render environment - first priority
+        chromedriver_path = "/usr/local/bin/chromedriver"
+        if os.path.exists(chromedriver_path):
+            logger.info(f"Found ChromeDriver at {chromedriver_path}")
+            try:
+                service = Service(executable_path=chromedriver_path)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                logger.info("Successfully created Chrome driver with explicit path")
+                return driver
+            except Exception as e:
+                logger.warning(f"Explicit path ChromeDriver failed: {str(e)}")
+        
+        # Try using system ChromeDriver next
+        try:
+            logger.info("Attempting to use system ChromeDriver...")
+            driver = webdriver.Chrome(options=chrome_options)
+            logger.info("Successfully created Chrome driver with system ChromeDriver")
+            return driver
+        except Exception as e:
+            logger.warning(f"System ChromeDriver failed: {str(e)}")
+        
+        # Try WebDriverManager as fallback - make sure to specify cache_valid_range
         try:
             logger.info("Trying WebDriverManager approach...")
-            service = Service(ChromeDriverManager().install())
-            browser = webdriver.Chrome(service=service, options=options)
-            logger.info("WebDriverManager setup successful")
-            browser.set_page_load_timeout(90)
-            return browser
-        except Exception as wdm_error:
-            logger.error(f"WebDriverManager setup failed: {str(wdm_error)}")
-            
-            # Try absolute minimal Chrome setup as last resort
+            logger.info("====== WebDriver manager ======")
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager(cache_valid_range=1).install()),
+                options=chrome_options
+            )
+            logger.info("Successfully created Chrome driver with WebDriverManager")
+            return driver
+        except Exception as e:
+            logger.error(f"WebDriverManager setup failed: {str(e)}")
+        
+        # Try absolute minimal setup as last resort
+        try:
+            logger.info("Trying absolute minimal Chrome setup...")
+            driver = webdriver.Chrome(options=chrome_options)
+            logger.info("Successfully created Chrome driver with minimal setup")
+            return driver
+        except Exception as e:
+            logger.error(f"Minimal setup failed: {str(e)}")
+            # Dump PATH environment variable for debugging
+            logger.error(f"PATH environment: {os.environ.get('PATH', 'Not set')}")
+            # Try to find chromedriver with 'which'
             try:
-                logger.info("Trying absolute minimal Chrome setup...")
-                min_options = Options()
-                min_options.add_argument("--headless=new")
-                min_options.add_argument("--no-sandbox")
-                min_options.add_argument("--disable-dev-shm-usage")
-                browser = webdriver.Chrome(options=min_options)
-                logger.info("Minimal Chrome setup successful")
-                return browser
-            except Exception as minimal_error:
-                logger.error(f"All browser setup attempts failed: {str(minimal_error)}")
-                return None
+                import subprocess
+                which_result = subprocess.run(['which', 'chromedriver'], capture_output=True, text=True)
+                logger.info(f"which chromedriver result: {which_result.stdout.strip()}")
+            except Exception as we:
+                logger.error(f"Failed to run 'which chromedriver': {str(we)}")
+        
+        raise Exception("All browser setup attempts failed")
+    except Exception as e:
+        logger.error(f"Failed to set up Chrome: {str(e)}")
+        raise
 
 def login_to_ringba(browser, username=None, password=None):
     """Login to Ringba with credentials"""
@@ -471,7 +490,7 @@ def navigate_to_call_logs(browser):
                 pass
             
             logger.info("Restarting browser...")
-            browser = setup_browser()
+            browser = setup_chrome()
             
             # Re-login if we had to restart the browser
             if not login_to_ringba(browser):
@@ -1457,7 +1476,7 @@ def export_csv(username=None, password=None, start_date=None, end_date=None):
         is_morning_run = True
         logger.info(f"This is a manual run at {current_hour}:{current_minute:02d} (defaulting to morning run behavior)")
     
-    browser = setup_browser()
+    browser = setup_chrome()
     if not browser:
         return False
     
@@ -1500,20 +1519,19 @@ def export_csv(username=None, password=None, start_date=None, end_date=None):
                 
                 # Based on the run type, perform different actions
                 if is_morning_run:
-                    # Morning run: simply save results and show targets above threshold
+                    # Morning run: just show targets below threshold
                     logger.info("Processing morning run (11 AM ET)")
-                    save_morning_results(targets_df, target_col, rpc_col)
                     send_results_to_slack(targets_df, target_col, rpc_col, run_label='morning')
                     
                 elif is_midday_run:
-                    # Midday run: compare with morning results
+                    # Midday run: just show targets below threshold
                     logger.info("Processing midday run (2 PM ET)")
-                    compare_and_send_midday_results(targets_df, target_col, rpc_col)
+                    send_results_to_slack(targets_df, target_col, rpc_col, run_label='midday')
                     
                 elif is_afternoon_run:
-                    # Afternoon run: compare with midday results (or morning if midday not available)
+                    # Afternoon run: just show targets below threshold
                     logger.info("Processing afternoon run (4:30 PM ET)")
-                    compare_and_send_afternoon_results(targets_df, target_col, rpc_col)
+                    send_results_to_slack(targets_df, target_col, rpc_col, run_label='afternoon')
                 
                 else:
                     # Default behavior for manual runs
@@ -1535,42 +1553,85 @@ def export_csv(username=None, password=None, start_date=None, end_date=None):
         browser.quit()
         logger.info("Browser closed automatically")
 
-if __name__ == "__main__":
-    # Check arguments
-    if len(sys.argv) < 3:
-        # No command line arguments provided, use environment variables
-        logger.info("No command line credentials provided, using .env credentials")
-        username = None  # Will use environment variables in login_to_ringba
-        password = None  # Will use environment variables in login_to_ringba
-        start_date = None  # Will use default date
-        end_date = None  # Will use default date
-    else:
-        # Get credentials from command line
-        username = sys.argv[1]
-        password = sys.argv[2]
-        
-        # Get date range
-        start_date = sys.argv[3] if len(sys.argv) > 3 else None
-        end_date = sys.argv[4] if len(sys.argv) > 4 else start_date
-    
-    # Set a global timeout for the entire process
-    def timeout_handler():
-        logger.error("Global timeout reached, forcing script termination")
-        # Force terminate the process
-        os.kill(os.getpid(), signal.SIGTERM)
-    
-    # Set 10 minute timeout for the entire process
-    global_timeout = int(os.getenv("GLOBAL_TIMEOUT_MINUTES", "10")) * 60
-    timer = threading.Timer(global_timeout, timeout_handler)
-    timer.daemon = True
-    timer.start()
-    
+def perform_test_run():
+    """Perform a test run when the service is first deployed"""
+    logger.info("Performing initial test run for web service deployment...")
     try:
-        # Run export
-        export_csv(username, password, start_date, end_date)
+        # Run the export with test parameters
+        result = export_csv(
+            username=None,  # Use environment variables
+            password=None,  # Use environment variables
+            start_date=datetime.now().strftime('%Y-%m-%d'),
+            end_date=datetime.now().strftime('%Y-%m-%d')
+        )
+        
+        if result:
+            logger.info("Test run completed successfully")
+            return True
+        else:
+            logger.error("Test run failed")
+            return False
     except Exception as e:
-        logger.error(f"Unhandled exception in main process: {str(e)}")
-    finally:
-        # Cancel timer if script completes normally
-        timer.cancel()
-        logger.info("Script execution complete") 
+        logger.error(f"Error during test run: {str(e)}")
+        return False
+
+if __name__ == "__main__":
+    # Check if we're running as a web service (PORT environment variable is set)
+    is_web_service = bool(os.getenv('PORT'))
+    
+    if is_web_service:
+        logger.info("Running as web service, performing initial test run...")
+        perform_test_run()
+        logger.info("Test run complete, service will now wait for scheduled runs")
+        
+        # Start Flask app for web service
+        from flask import Flask
+        app = Flask(__name__)
+        
+        @app.route('/')
+        def home():
+            return "Ringba Export Service is running. Scheduled runs at 11 AM, 2 PM, and 4:30 PM ET."
+        
+        # Get port from environment variable
+        port = int(os.getenv('PORT', 8080))
+        app.run(host='0.0.0.0', port=port)
+    else:
+        # Regular command-line execution
+        # Check arguments
+        if len(sys.argv) < 3:
+            # No command line arguments provided, use environment variables
+            logger.info("No command line credentials provided, using .env credentials")
+            username = None  # Will use environment variables in login_to_ringba
+            password = None  # Will use environment variables in login_to_ringba
+            start_date = None  # Will use default date
+            end_date = None  # Will use default date
+        else:
+            # Get credentials from command line
+            username = sys.argv[1]
+            password = sys.argv[2]
+            
+            # Get date range
+            start_date = sys.argv[3] if len(sys.argv) > 3 else None
+            end_date = sys.argv[4] if len(sys.argv) > 4 else start_date
+        
+        # Set a global timeout for the entire process
+        def timeout_handler():
+            logger.error("Global timeout reached, forcing script termination")
+            # Force terminate the process
+            os.kill(os.getpid(), signal.SIGTERM)
+        
+        # Set 10 minute timeout for the entire process
+        global_timeout = int(os.getenv("GLOBAL_TIMEOUT_MINUTES", "10")) * 60
+        timer = threading.Timer(global_timeout, timeout_handler)
+        timer.daemon = True
+        timer.start()
+        
+        try:
+            # Run export
+            export_csv(username, password, start_date, end_date)
+        except Exception as e:
+            logger.error(f"Unhandled exception in main process: {str(e)}")
+        finally:
+            # Cancel timer if script completes normally
+            timer.cancel()
+            logger.info("Script execution complete") 

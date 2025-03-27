@@ -1,23 +1,29 @@
 services:
   - type: web
-    name: ringba-exporter
-    env: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    branch: main
-    numInstances: 1
-    autoDeploy: true
-    healthCheckPath: /
+    name: ringba-export
+    env: python
+    buildCommand: |
+      # Install Chrome and ChromeDriver
+      wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+      echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
+      apt-get update
+      apt-get install -y google-chrome-stable
+      apt-get install -y chromium-chromedriver
+      # Install Python dependencies
+      pip install -r requirements.txt
+    startCommand: python src/simple_export.py
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.0
       - key: RINGBA_USERNAME
         sync: false
       - key: RINGBA_PASSWORD
         sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
       - key: RINGBA_API_TOKEN
         sync: false
       - key: RINGBA_ACCOUNT_ID
-        sync: false
-      - key: SLACK_WEBHOOK_URL
         sync: false
       - key: RPC_THRESHOLD
         value: 12.0
@@ -29,9 +35,11 @@ services:
         value: 16:30
       - key: TZ
         value: America/New_York
-      - key: PYTHONUNBUFFERED
-        value: "true"
       - key: USE_HEADLESS
-        value: "true"
+        value: true
       - key: CHROME_OPTIONS
-        value: "--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions" 
+        value: "--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions"
+      - key: PYTHONUNBUFFERED
+        value: true
+      - key: PORT
+        value: 8080 
