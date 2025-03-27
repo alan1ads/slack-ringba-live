@@ -1018,7 +1018,7 @@ def export_csv():
     try:
         # Determine the current time in Eastern time
         eastern_tz = pytz.timezone('America/New_York')
-        now = datetime.datetime.now(eastern_tz)
+        now = datetime.now(eastern_tz)
         
         # Format for checking times
         current_time_str = now.strftime('%H:%M')
@@ -1082,13 +1082,8 @@ def perform_test_run():
     """Perform a test run when the service is first deployed"""
     logger.info("Performing initial test run for web service deployment...")
     try:
-        # Run the export with test parameters
-        result = export_csv(
-            username=None,  # Use environment variables
-            password=None,  # Use environment variables
-            start_date=datetime.now().strftime('%Y-%m-%d'),
-            end_date=datetime.now().strftime('%Y-%m-%d')
-        )
+        # Run the export with no parameters (uses environment variables)
+        result = export_csv()
         
         if result:
             logger.info("Test run completed successfully")
@@ -1122,22 +1117,7 @@ if __name__ == "__main__":
         app.run(host='0.0.0.0', port=port)
     else:
         # Regular command-line execution
-        # Check arguments
-        if len(sys.argv) < 3:
-            # No command line arguments provided, use environment variables
-            logger.info("No command line credentials provided, using .env credentials")
-            username = None  # Will use environment variables in login_to_ringba
-            password = None  # Will use environment variables in login_to_ringba
-            start_date = None  # Will use default date
-            end_date = None  # Will use default date
-        else:
-            # Get credentials from command line
-            username = sys.argv[1]
-            password = sys.argv[2]
-            
-            # Get date range
-            start_date = sys.argv[3] if len(sys.argv) > 3 else None
-            end_date = sys.argv[4] if len(sys.argv) > 4 else start_date
+        logger.info("Running as command-line tool")
         
         # Set a global timeout for the entire process
         def timeout_handler():
@@ -1153,11 +1133,10 @@ if __name__ == "__main__":
         
         try:
             # Run export
-            export_csv(username, password, start_date, end_date)
+            export_csv()
         except Exception as e:
             logger.error(f"Unhandled exception in main process: {str(e)}")
         finally:
             # Cancel timer if script completes normally
             timer.cancel()
-            logger.info("Script execution complete") 
             logger.info("Script execution complete") 
