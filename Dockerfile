@@ -29,6 +29,23 @@ RUN apt-get update && apt-get install -y \
     google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
+# Install ChromeDriver with a specific version that we know works
+RUN mkdir -p /tmp/chromedriver \
+    && cd /tmp/chromedriver \
+    && CHROMEDRIVER_VERSION="113.0.5672.63" \
+    && echo "Using Chrome Driver version: $CHROMEDRIVER_VERSION" \
+    && wget -q https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip \
+    && unzip chromedriver_linux64.zip \
+    && mv chromedriver /usr/local/bin/chromedriver \
+    && ln -sf /usr/local/bin/chromedriver /usr/bin/chromedriver \
+    && chmod +x /usr/local/bin/chromedriver \
+    && chmod +x /usr/bin/chromedriver \
+    && cd / \
+    && rm -rf /tmp/chromedriver \
+    && echo "ChromeDriver installed at: " \
+    && which chromedriver \
+    && chromedriver --version
+
 # Set up working directory
 WORKDIR /app
 
@@ -47,6 +64,7 @@ ENV USE_HEADLESS=true
 ENV PYTHONUNBUFFERED=true
 ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions"
 ENV PORT=8080
+ENV PATH="/usr/local/bin:/usr/bin:${PATH}"
 
 # Expose the port for the web service
 EXPOSE 8080
