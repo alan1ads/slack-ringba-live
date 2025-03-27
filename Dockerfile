@@ -29,21 +29,22 @@ RUN apt-get update && apt-get install -y \
     google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver with a specific version that we know works
-RUN mkdir -p /tmp/chromedriver \
+# Get Chrome version and install matching ChromeDriver
+RUN google-chrome --version | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" > /tmp/chrome_version.txt \
+    && CHROME_VERSION=$(cat /tmp/chrome_version.txt) \
+    && CHROME_MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1) \
+    && echo "Chrome version: $CHROME_VERSION (Major: $CHROME_MAJOR_VERSION)" \
+    && mkdir -p /tmp/chromedriver \
     && cd /tmp/chromedriver \
-    && CHROMEDRIVER_VERSION="113.0.5672.63" \
-    && echo "Using Chrome Driver version: $CHROMEDRIVER_VERSION" \
-    && wget -q https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip \
-    && unzip chromedriver_linux64.zip \
-    && mv chromedriver /usr/local/bin/chromedriver \
+    && wget -q -O chromedriver.zip "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chromedriver-linux64.zip" \
+    && unzip chromedriver.zip \
+    && mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
     && ln -sf /usr/local/bin/chromedriver /usr/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
     && chmod +x /usr/bin/chromedriver \
     && cd / \
     && rm -rf /tmp/chromedriver \
-    && echo "ChromeDriver installed at: " \
-    && which chromedriver \
+    && echo "ChromeDriver installed at: $(which chromedriver)" \
     && chromedriver --version
 
 # Set up working directory
