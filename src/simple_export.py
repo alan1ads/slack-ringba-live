@@ -28,6 +28,7 @@ import signal
 import pickle
 import requests
 import base64
+import csv
 
 # Load environment variables
 load_dotenv()
@@ -169,14 +170,37 @@ def setup_browser():
         # Set page load strategy to eager (don't wait for all resources)
         chrome_options.page_load_strategy = 'eager'
             
-        # Set download directory
-        download_dir = os.path.abspath(os.getcwd())
+        # Create an explicit download directory that's guaranteed to be writable in the container
+        download_dir = os.path.join(os.path.abspath(os.getcwd()), "downloads")
+        os.makedirs(download_dir, exist_ok=True)
+        logger.info(f"Created download directory: {download_dir}")
+        
+        # Check if directory is writable
+        try:
+            test_file_path = os.path.join(download_dir, "test_file.txt")
+            with open(test_file_path, "w") as f:
+                f.write("test")
+            os.remove(test_file_path)
+            logger.info(f"Download directory {download_dir} is writable")
+        except Exception as e:
+            logger.error(f"Download directory {download_dir} is not writable: {str(e)}")
+            # Try fallback to /tmp
+            download_dir = "/tmp"
+            logger.info(f"Using fallback download directory: {download_dir}")
+            
+        # Set very explicit download settings
         prefs = {
             "download.default_directory": download_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
             "safebrowsing.enabled": False,
-            "plugins.always_open_pdf_externally": True
+            "safebrowsing.disable_download_protection": True,
+            "profile.default_content_settings.popups": 0,
+            "download.open_pdf_in_system_reader": False,
+            "plugins.always_open_pdf_externally": True,
+            "browser.download.folderList": 2,
+            "browser.download.dir": download_dir,
+            "browser.helperApps.neverAsk.saveToDisk": "application/csv,text/csv,application/vnd.ms-excel"
         }
         chrome_options.add_experimental_option("prefs", prefs)
         
@@ -184,8 +208,12 @@ def setup_browser():
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
         
+        # Set the global download directory as an environment variable
+        os.environ["DOWNLOAD_DIR"] = download_dir
+        
         # Log the final Chrome options
         logger.info(f"Setting up Chrome with options: {chrome_options.arguments}")
+        logger.info(f"Download directory set to: {download_dir}")
         
         # Create the browser
         browser = webdriver.Chrome(options=chrome_options)
@@ -398,10 +426,20 @@ def set_date_range(browser, start_date, end_date):
 def click_export_csv(browser):
     """Click the Export CSV button and download the file"""
     try:
+        # Get the download directory from the environment variable set in setup_browser
+        download_dir = os.environ.get("DOWNLOAD_DIR", os.path.join(os.path.abspath(os.getcwd()), "downloads"))
+        logger.info(f"Using download directory: {download_dir}")
+        
+        # Ensure the directory exists
+        os.makedirs(download_dir, exist_ok=True)
+        
         # Get list of existing CSV files before export attempt (to compare later)
-        download_dir = os.path.abspath(os.getcwd())
-        existing_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
-        logger.info(f"Existing CSV files before export: {existing_csv_files}")
+        existing_csv_files = set()
+        try:
+            existing_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
+            logger.info(f"Existing CSV files before export: {existing_csv_files}")
+        except Exception as e:
+            logger.warning(f"Error listing existing CSV files: {str(e)}")
         
         # Navigate directly to the summary page with export option
         logger.info("Navigating directly to call summary report...")
@@ -415,6 +453,19 @@ def click_export_csv(browser):
         
         # Take screenshot to see page state
         take_screenshot(browser, "before_export_attempt")
+        
+        # First try to change the download directory via JavaScript
+        try:
+            logger.info("Setting download directory via JavaScript")
+            browser.execute_script(f"""
+                Object.defineProperty(navigator, 'userAgent', {{'get': function() {{
+                    return 'Mozilla/5.0 Chrome/87.0.4280.88';
+                }}}});
+                // Try to set download path
+                navigator.registerProtocolHandler('web+download', '{download_dir}/$1', 'Download Handler');
+            """)
+        except Exception as e:
+            logger.warning(f"Failed to set download directory via JavaScript: {str(e)}")
             
         # Try multiple approaches to find and click the export button
         logger.info("Trying multiple approaches to find and click EXPORT CSV button...")
@@ -538,23 +589,81 @@ def click_export_csv(browser):
         start_time = time.time()
         new_file = None
         
+        # Approach 1: Check for new files in the download directory
         while time.time() - start_time < max_wait_time:
             # Check for new CSV files
-            current_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
-            new_csv_files = current_csv_files - existing_csv_files
-            
-            if new_csv_files:
-                logger.info(f"New CSV files detected: {new_csv_files}")
-                # Get the most recently created file
-                newest_file = max(new_csv_files, key=lambda f: os.path.getctime(os.path.join(download_dir, f)))
-                new_file = os.path.join(download_dir, newest_file)
-                logger.info(f"Found newly downloaded CSV file: {newest_file}")
-                break
+            try:
+                current_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
+                new_csv_files = current_csv_files - existing_csv_files
+                
+                if new_csv_files:
+                    logger.info(f"New CSV files detected: {new_csv_files}")
+                    # Get the most recently created file
+                    newest_file = max(new_csv_files, key=lambda f: os.path.getctime(os.path.join(download_dir, f)))
+                    new_file = os.path.join(download_dir, newest_file)
+                    logger.info(f"Found newly downloaded CSV file: {newest_file}")
+                    break
+            except Exception as e:
+                logger.warning(f"Error checking for new CSV files: {str(e)}")
                 
             # Wait a bit before checking again
             logger.info(f"Waiting for download... ({int(time.time() - start_time)} seconds elapsed)")
             time.sleep(5)
-            
+        
+        # If no new file was found, try a different approach: grab the data directly from the page
+        if not new_file:
+            logger.warning("No new CSV file detected, trying to extract data directly from page")
+            try:
+                # Try to extract the table data directly from the page using JavaScript
+                table_data = browser.execute_script("""
+                    // Try to find the table element
+                    var tables = document.querySelectorAll('table.mat-table');
+                    if (tables.length === 0) {
+                        return null;
+                    }
+                    
+                    var table = tables[0];
+                    var headers = [];
+                    var rows = [];
+                    
+                    // Get headers
+                    var headerCells = table.querySelectorAll('th');
+                    for (var i = 0; i < headerCells.length; i++) {
+                        headers.push(headerCells[i].innerText.trim());
+                    }
+                    
+                    // Get rows
+                    var rowElements = table.querySelectorAll('tr:not(:first-child)');
+                    for (var i = 0; i < rowElements.length; i++) {
+                        var row = {};
+                        var cells = rowElements[i].querySelectorAll('td');
+                        for (var j = 0; j < Math.min(cells.length, headers.length); j++) {
+                            row[headers[j]] = cells[j].innerText.trim();
+                        }
+                        rows.push(row);
+                    }
+                    
+                    return {headers: headers, rows: rows};
+                """)
+                
+                if table_data and table_data.get('rows'):
+                    logger.info(f"Successfully extracted {len(table_data['rows'])} rows of data directly from page")
+                    
+                    # Create a CSV file from the extracted data
+                    extracted_csv_path = os.path.join(download_dir, f"extracted_data_{int(time.time())}.csv")
+                    
+                    with open(extracted_csv_path, 'w', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=table_data['headers'])
+                        writer.writeheader()
+                        writer.writerows(table_data['rows'])
+                    
+                    logger.info(f"Saved extracted data to {extracted_csv_path}")
+                    return extracted_csv_path
+                else:
+                    logger.warning("Could not extract data from page")
+            except Exception as e:
+                logger.error(f"Error extracting data from page: {str(e)}")
+        
         if not new_file:
             logger.error("No new CSV file detected after waiting. Download may have failed.")
             return None
