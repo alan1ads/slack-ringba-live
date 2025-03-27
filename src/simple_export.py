@@ -27,6 +27,7 @@ import threading
 import signal
 import pickle
 import requests
+import base64
 
 # Load environment variables
 load_dotenv()
@@ -138,12 +139,35 @@ def debug_environment():
 def setup_browser():
     """Set up the Chrome browser with appropriate options"""
     try:
+        # Debug environment variables 
+        logger.info(f"Chrome options from env: {os.getenv('CHROME_OPTIONS', 'Not set')}")
+        
+        # Create Chrome options
         chrome_options = webdriver.ChromeOptions()
         
-        # Get Chrome options from environment variable or use defaults
-        chrome_options_str = os.getenv('CHROME_OPTIONS', '--headless=new --no-sandbox --disable-dev-shm-usage')
-        for option in chrome_options_str.split():
-            chrome_options.add_argument(option.strip())
+        # Core stability options - always include these regardless of env vars
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        
+        # Additional stability options
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-infobars")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_argument("--disable-popup-blocking")
+        
+        # Get additional Chrome options from environment variable
+        chrome_options_str = os.getenv('CHROME_OPTIONS', '')
+        if chrome_options_str:
+            logger.info(f"Adding additional Chrome options from environment: {chrome_options_str}")
+            for option in chrome_options_str.split():
+                if option.strip() and not any(opt in option for opt in ["--headless", "--no-sandbox", "--disable-dev-shm-usage"]):
+                    chrome_options.add_argument(option.strip())
+        
+        # Set page load strategy to eager (don't wait for all resources)
+        chrome_options.page_load_strategy = 'eager'
             
         # Set download directory
         download_dir = os.path.abspath(os.getcwd())
@@ -151,16 +175,24 @@ def setup_browser():
             "download.default_directory": download_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
-            "safebrowsing.enabled": False
+            "safebrowsing.enabled": False,
+            "plugins.always_open_pdf_externally": True
         }
         chrome_options.add_experimental_option("prefs", prefs)
         
-        logger.info(f"Setting up Chrome with options: {chrome_options_str}")
+        # Disable automation flags
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+        
+        # Log the final Chrome options
+        logger.info(f"Setting up Chrome with options: {chrome_options.arguments}")
+        
+        # Create the browser
         browser = webdriver.Chrome(options=chrome_options)
         
         # Set timeout
-        browser.set_page_load_timeout(60)
-        browser.implicitly_wait(10)
+        browser.set_page_load_timeout(90)  # Longer timeout for page loads
+        browser.implicitly_wait(15)        # Longer implicit wait
         
         # Set window size
         browser.set_window_size(1920, 1080)
@@ -177,52 +209,184 @@ def login_to_ringba(browser):
         # Navigate to login page
         logger.info("Navigating to Ringba login page...")
         browser.get("https://app.ringba.com/#/login")
-        time.sleep(5)  # Wait for page to load
+        time.sleep(10)  # Wait longer for page to load
         
-        # Enter username and password
-        logger.info("Entering login credentials...")
-        username_input = browser.find_element(By.ID, "mat-input-0")
-        password_input = browser.find_element(By.ID, "mat-input-1")
+        # Take screenshot for debugging
+        take_screenshot(browser, "before_login")
         
+        # Wait for login form to be present
+        logger.info("Waiting for login form...")
+        wait = WebDriverWait(browser, 30)
+        
+        # Try different approaches to find the username field
+        username_input = None
+        username_selectors = [
+            (By.ID, "mat-input-0"),
+            (By.NAME, "username"),
+            (By.CSS_SELECTOR, "input[type='email']"),
+            (By.CSS_SELECTOR, "input[formcontrolname='username']"),
+            (By.CSS_SELECTOR, "input.username"),
+            (By.XPATH, "//input[@placeholder='Username' or @placeholder='Email']")
+        ]
+        
+        for selector_type, selector in username_selectors:
+            try:
+                logger.info(f"Trying to find username field with {selector_type}={selector}")
+                username_input = wait.until(EC.presence_of_element_located((selector_type, selector)))
+                logger.info(f"Found username field with {selector_type}={selector}")
+                break
+            except:
+                continue
+        
+        if not username_input:
+            logger.error("Could not find username field")
+            take_screenshot(browser, "username_not_found")
+            return False
+        
+        # Try different approaches to find the password field
+        password_input = None
+        password_selectors = [
+            (By.ID, "mat-input-1"),
+            (By.NAME, "password"),
+            (By.CSS_SELECTOR, "input[type='password']"),
+            (By.CSS_SELECTOR, "input[formcontrolname='password']"),
+            (By.XPATH, "//input[@placeholder='Password']")
+        ]
+        
+        for selector_type, selector in password_selectors:
+            try:
+                logger.info(f"Trying to find password field with {selector_type}={selector}")
+                password_input = wait.until(EC.presence_of_element_located((selector_type, selector)))
+                logger.info(f"Found password field with {selector_type}={selector}")
+                break
+            except:
+                continue
+        
+        if not password_input:
+            logger.error("Could not find password field")
+            take_screenshot(browser, "password_not_found")
+            return False
+        
+        # Enter credentials
+        logger.info("Entering credentials...")
+        username_input.clear()
         username_input.send_keys(RINGBA_USERNAME)
+        password_input.clear()
         password_input.send_keys(RINGBA_PASSWORD)
         
-        # Click login button
-        login_button = browser.find_element(By.XPATH, "//button[@type='submit']")
-        login_button.click()
+        # Take screenshot before clicking login
+        take_screenshot(browser, "credentials_entered")
+        
+        # Try to find and click the login button
+        login_button = None
+        button_selectors = [
+            (By.XPATH, "//button[@type='submit']"),
+            (By.CSS_SELECTOR, "button[type='submit']"),
+            (By.XPATH, "//button[contains(text(), 'Login') or contains(text(), 'Sign In')]"),
+            (By.CSS_SELECTOR, ".login-button"),
+            (By.CSS_SELECTOR, "button.mat-button")
+        ]
+        
+        for selector_type, selector in button_selectors:
+            try:
+                logger.info(f"Trying to find login button with {selector_type}={selector}")
+                login_button = wait.until(EC.element_to_be_clickable((selector_type, selector)))
+                logger.info(f"Found login button with {selector_type}={selector}")
+                break
+            except:
+                continue
+        
+        if login_button:
+            logger.info("Clicking login button...")
+            login_button.click()
+        else:
+            # Try submitting the form by pressing Enter on the password field
+            logger.info("No login button found, trying to submit by pressing Enter")
+            password_input.send_keys(Keys.RETURN)
         
         # Wait for login to complete
         logger.info("Waiting for login to complete...")
-        wait = WebDriverWait(browser, 30)
         wait.until(EC.url_contains("dashboard"))
+        
+        # Take screenshot after login
+        take_screenshot(browser, "after_login")
         
         logger.info("Successfully logged in to Ringba")
         return True
     except Exception as e:
         logger.error(f"Failed to login to Ringba: {str(e)}")
+        take_screenshot(browser, "login_error")
         return False
 
 def navigate_to_call_logs(browser):
     """Navigate to Call Logs page"""
-    try:
-        # Directly navigate to the Call Logs URL
-        logger.info("Navigating directly to call logs report...")
-        browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
-        
-        # Wait for page to load
-        logger.info("Waiting for call logs page to load...")
-        time.sleep(10)
-        
-        # Check if we're on the right page
-        if "call-logs" in browser.current_url:
-            logger.info("Successfully navigated to call logs page")
-            return True
-        else:
-            logger.error(f"Failed to navigate to call logs page. Current URL: {browser.current_url}")
-            return False
-    except Exception as e:
-        logger.error(f"Failed to navigate to call logs page: {str(e)}")
-        return False
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Directly navigate to the Call Logs URL
+            logger.info(f"Navigating to call logs report (attempt {attempt+1}/{max_retries})...")
+            browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
+            
+            # Wait for page to load
+            logger.info("Waiting for call logs page to load...")
+            time.sleep(15)
+            
+            # Take screenshot
+            take_screenshot(browser, f"call_logs_page_attempt_{attempt+1}")
+            
+            # Use WebDriverWait to look for elements that indicate page is loaded
+            wait = WebDriverWait(browser, 30)
+            
+            # Try different selectors to confirm the page is loaded
+            selectors = [
+                (By.CSS_SELECTOR, ".reporting-container"),
+                (By.CSS_SELECTOR, ".dashboard-container"),
+                (By.CSS_SELECTOR, "table.mat-table"),
+                (By.CSS_SELECTOR, ".mat-elevation-z8"),
+                (By.XPATH, "//h1[contains(text(), 'Call Logs')]"),
+                (By.XPATH, "//button[contains(text(), 'Export')]")
+            ]
+            
+            page_loaded = False
+            for selector_type, selector in selectors:
+                try:
+                    logger.info(f"Looking for element with {selector_type}={selector}")
+                    wait.until(EC.presence_of_element_located((selector_type, selector)))
+                    logger.info(f"Found element with {selector_type}={selector} - page appears to be loaded")
+                    page_loaded = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Element {selector_type}={selector} not found: {str(e)}")
+            
+            # If we find any indicator that the page loaded successfully
+            if page_loaded:
+                logger.info("Successfully navigated to call logs page")
+                return True
+                
+            # Even if indicators aren't found, check if we have the right URL
+            if "call-logs" in browser.current_url:
+                logger.info("URL contains 'call-logs' - assuming navigation was successful")
+                return True
+            else:
+                logger.error(f"Failed to navigate to call logs page. Current URL: {browser.current_url}")
+                if attempt < max_retries - 1:
+                    logger.info("Retrying navigation...")
+                    time.sleep(5)
+                else:
+                    logger.error("Max retries reached, giving up on navigation")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to navigate to call logs page (attempt {attempt+1}): {str(e)}")
+            if attempt < max_retries - 1:
+                logger.info("Retrying navigation...")
+                time.sleep(5)
+            else:
+                logger.error("Max retries reached, giving up on navigation")
+                return False
+                
+    # If we get here, all attempts failed
+    return False
 
 def set_date_range(browser, start_date, end_date):
     """Set the date range for call logs"""
@@ -238,15 +402,21 @@ def click_export_csv(browser):
         logger.info("Navigating directly to call summary report...")
         try:
             browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
-            time.sleep(10)  # Give page time to load
+            logger.info("Waiting for summary page to load...")
+            time.sleep(15)  # Give page more time to load
         except Exception as e:
             logger.error(f"Failed to navigate to summary page: {str(e)}")
-            
-        # Ultra simple approach - click EXPORT CSV via text content
-        logger.info("Trying direct approach to find EXPORT CSV button...")
+            take_screenshot(browser, "navigation_failed")
         
+        # Take screenshot to see page state
+        take_screenshot(browser, "before_export_attempt")
+            
+        # Try multiple approaches to find and click the export button
+        logger.info("Trying multiple approaches to find and click EXPORT CSV button...")
+        
+        # Approach 1: Use JavaScript to find and click the button by text content
         try:
-            # Simple JS to find and click the button
+            logger.info("Approach 1: Using JavaScript to find button by text content")
             result = browser.execute_script("""
                 // Find all buttons/spans that contain 'export' or 'csv'
                 var buttons = [];
@@ -258,9 +428,14 @@ def click_export_csv(browser):
                     }
                 });
                 
+                // Log what we found for debugging
+                console.log("Found " + buttons.length + " potential export buttons");
+                buttons.forEach(function(b, i) { 
+                    console.log(i + ": " + b.textContent.trim() + " - " + b.tagName); 
+                });
+                
                 // If found any, click the first one
                 if (buttons.length > 0) {
-                    console.log("Found " + buttons.length + " potential export buttons");
                     buttons[0].click();
                     return true;
                 }
@@ -269,16 +444,84 @@ def click_export_csv(browser):
             """)
             
             if result:
-                logger.info("Successfully clicked export button")
+                logger.info("Successfully clicked export button via JavaScript")
                 time.sleep(15)  # Wait for download to start
             else:
-                logger.warning("Could not find export button via text content")
+                logger.warning("Could not find export button via JavaScript")
+                take_screenshot(browser, "js_approach_failed")
         except Exception as e:
-            logger.error(f"Error clicking export button: {str(e)}")
+            logger.error(f"Error with JavaScript approach: {str(e)}")
+            take_screenshot(browser, "js_approach_error")
         
-        # Wait for download to complete
+        # Approach 2: Try with explicit WebDriverWait and CSS selectors
+        if not result:
+            try:
+                logger.info("Approach 2: Using WebDriverWait with various CSS selectors")
+                selectors = [
+                    "button.export-button",
+                    ".export-csv",
+                    "button.mat-button:has-text('EXPORT CSV')",
+                    "button:contains('EXPORT')",
+                    "button[title*='Export']",
+                    "a.export-link"
+                ]
+                
+                for selector in selectors:
+                    try:
+                        logger.info(f"Trying selector: {selector}")
+                        export_button = WebDriverWait(browser, 5).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                        logger.info(f"Found button with selector: {selector}")
+                        export_button.click()
+                        logger.info("Clicked the export button")
+                        result = True
+                        time.sleep(15)  # Wait for download to start
+                        break
+                    except Exception as e:
+                        logger.warning(f"Selector {selector} failed: {str(e)}")
+                        continue
+            except Exception as e:
+                logger.error(f"Error with explicit selectors approach: {str(e)}")
+                take_screenshot(browser, "explicit_selectors_error")
+        
+        # Approach 3: Try with XPath to find buttons containing text
+        if not result:
+            try:
+                logger.info("Approach 3: Using XPath to find buttons by text content")
+                xpaths = [
+                    "//button[contains(., 'EXPORT')]",
+                    "//button[contains(., 'Export')]",
+                    "//button[contains(., 'CSV')]",
+                    "//a[contains(., 'Export')]",
+                    "//span[contains(., 'Export')]"
+                ]
+                
+                for xpath in xpaths:
+                    try:
+                        logger.info(f"Trying XPath: {xpath}")
+                        export_button = WebDriverWait(browser, 5).until(
+                            EC.element_to_be_clickable((By.XPATH, xpath))
+                        )
+                        logger.info(f"Found button with XPath: {xpath}")
+                        export_button.click()
+                        logger.info("Clicked the export button")
+                        result = True
+                        time.sleep(15)  # Wait for download to start
+                        break
+                    except Exception as e:
+                        logger.warning(f"XPath {xpath} failed: {str(e)}")
+                        continue
+            except Exception as e:
+                logger.error(f"Error with XPath approach: {str(e)}")
+                take_screenshot(browser, "xpath_approach_error")
+        
+        # Take screenshot after export attempt
+        take_screenshot(browser, "after_export_attempt")
+        
+        # Wait for download to complete, regardless of whether we know we clicked successfully
         logger.info("Waiting for download to complete...")
-        time.sleep(30)
+        time.sleep(45)  # Wait longer to ensure download completes
         
         # Look for any CSV files
         download_dir = os.path.abspath(os.getcwd())
@@ -290,12 +533,12 @@ def click_export_csv(browser):
             latest_csv = csv_files[0]
             logger.info(f"Found latest CSV file: {latest_csv}")
             
-            # Check if it's a newly created file (within last minute)
+            # Check if it's a newly created file (within last 5 minutes)
             file_path = os.path.join(download_dir, latest_csv)
             file_creation_time = os.path.getctime(file_path)
             current_time = time.time()
             
-            if current_time - file_creation_time < 120:  # 2 minutes
+            if current_time - file_creation_time < 300:  # 5 minutes
                 logger.info(f"Using newly created CSV file: {latest_csv}")
                 return file_path
             else:
@@ -312,6 +555,7 @@ def click_export_csv(browser):
             
     except Exception as e:
         logger.error(f"Failed to export CSV: {str(e)}")
+        take_screenshot(browser, "export_error")
         return None
 
 def process_csv_file(file_path):
