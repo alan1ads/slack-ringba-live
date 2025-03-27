@@ -38,17 +38,31 @@ services:
       apt-get update
       apt-get install -y google-chrome-stable
       
-      # Install specific version of ChromeDriver that matches Chrome
+      # Install ChromeDriver using a more direct approach
+      # Get the Chrome version
       CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1)
-      CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION")
-      wget -q -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip"
-      unzip /tmp/chromedriver.zip -d /usr/local/bin/
-      chmod +x /usr/local/bin/chromedriver
-      rm /tmp/chromedriver.zip
+      echo "Chrome version: $CHROME_VERSION"
       
-      # Verify installations
+      # Download the matching ChromeDriver version
+      wget -q -O /tmp/LATEST_RELEASE "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION"
+      DRIVER_VERSION=$(cat /tmp/LATEST_RELEASE)
+      echo "Using ChromeDriver version: $DRIVER_VERSION"
+      
+      # Download and install ChromeDriver
+      wget -q -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/$DRIVER_VERSION/chromedriver_linux64.zip"
+      unzip -o /tmp/chromedriver.zip -d /usr/local/bin/
+      chmod +x /usr/local/bin/chromedriver
+      
+      # Create symlinks to ensure it's in PATH
+      ln -sf /usr/local/bin/chromedriver /usr/bin/chromedriver
+      
+      # Verify installations and permissions
+      echo "Checking installations:"
       google-chrome --version
       chromedriver --version
+      ls -la /usr/local/bin/chromedriver
+      ls -la /usr/bin/chromedriver
+      echo "PATH: $PATH"
       
       # Install Python dependencies
       pip install -r requirements.txt
@@ -83,6 +97,6 @@ services:
       - key: PYTHONUNBUFFERED
         value: true
       - key: PATH
-        value: "/usr/local/bin:${PATH}"
+        value: "/usr/local/bin:/usr/bin:${PATH}"
       - key: PORT
         value: 8080 

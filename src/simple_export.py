@@ -176,7 +176,7 @@ def setup_chrome():
             logger.info("Trying WebDriverManager approach...")
             logger.info("====== WebDriver manager ======")
             driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager(cache_valid_range=1).install()),
+                service=Service(ChromeDriverManager().install()),
                 options=chrome_options
             )
             logger.info("Successfully created Chrome driver with WebDriverManager")
