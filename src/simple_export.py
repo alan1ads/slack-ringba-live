@@ -143,12 +143,44 @@ def setup_chrome():
             for option in chrome_options_str.split():
                 chrome_options.add_argument(option)
         
-        # Add additional options for Render environment
+        # Add enhanced stability options for containerized environment
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--disable-software-rasterizer')
         chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-infobars')
+        chrome_options.add_argument('--disable-notifications')
+        chrome_options.add_argument('--disable-features=VizDisplayCompositor')
+        chrome_options.add_argument('--disable-features=NetworkService')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--start-maximized')
+        chrome_options.add_argument('--ignore-certificate-errors')
+        chrome_options.add_argument('--disable-popup-blocking')
+        
+        # Add memory options to prevent crashes
+        chrome_options.add_argument('--js-flags=--max-old-space-size=4096')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-hang-monitor')
+        chrome_options.add_argument('--disable-crash-reporter')
+        
+        # Add experimental options
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        # Set page load strategy to eager
+        chrome_options.page_load_strategy = 'eager'
+        
+        # Add preferences for downloads
+        prefs = {
+            "download.default_directory": os.path.abspath(os.getcwd()),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": False,
+            "credentials_enable_service": True,
+            "profile.password_manager_enabled": True
+        }
+        chrome_options.add_experimental_option("prefs", prefs)
         
         # Explicitly set the path on Render environment - first priority
         chromedriver_path = "/usr/local/bin/chromedriver"
@@ -171,7 +203,7 @@ def setup_chrome():
         except Exception as e:
             logger.warning(f"System ChromeDriver failed: {str(e)}")
         
-        # Try WebDriverManager as fallback - make sure to specify cache_valid_range
+        # Try WebDriverManager as fallback
         try:
             logger.info("Trying WebDriverManager approach...")
             logger.info("====== WebDriver manager ======")

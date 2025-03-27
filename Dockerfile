@@ -63,9 +63,12 @@ RUN mkdir -p data screenshots
 # Set environment variables
 ENV USE_HEADLESS=true
 ENV PYTHONUNBUFFERED=true
-ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions"
+ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions --disable-infobars --disable-notifications --window-size=1920,1080 --start-maximized --disable-features=VizDisplayCompositor --disable-features=NetworkService"
 ENV PORT=8080
 ENV PATH="/usr/local/bin:/usr/bin:${PATH}"
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PYTHONIOENCODING=UTF-8
 
 # Expose the port for the web service
 EXPOSE 8080
