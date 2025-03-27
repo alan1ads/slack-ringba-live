@@ -63,11 +63,14 @@ RUN mkdir -p data screenshots
 # Set environment variables
 ENV USE_HEADLESS=true
 ENV PYTHONUNBUFFERED=true
-ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --disable-extensions --disable-infobars --disable-notifications --window-size=1920,1080 --start-maximized --disable-features=VizDisplayCompositor --disable-features=NetworkService"
+# Simpler Chrome options for greater stability
+ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu"
 ENV PORT=8080
 ENV PATH="/usr/local/bin:/usr/bin:${PATH}"
-ENV NODE_OPTIONS="--max-old-space-size=4096"
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# Increase memory allocation
+ENV NODE_OPTIONS="--max-old-space-size=8192"
+# Add shared memory size for Chrome
+ENV CHROME_SHIM_ARGS="--shm-size=2gb"
 ENV PYTHONIOENCODING=UTF-8
 
 # Expose the port for the web service

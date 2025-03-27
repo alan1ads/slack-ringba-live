@@ -545,207 +545,130 @@ def click_export_csv(browser):
         start_time = time.time()
         max_wait_time = 60  # Maximum 60 seconds for the entire process
         
-        # Ensure page is properly loaded and stable
-        logger.info("Executing JavaScript to scroll and ensure page is ready...")
-        try:
-            # Scroll to ensure the page is fully rendered
-            browser.execute_script("window.scrollTo(0, 0);")
-            browser.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-            browser.execute_script("window.scrollTo(0, 0);")
-            
-            # Attempt to force page to be ready
-            browser.execute_script("""
-                // Force any pending DOM updates
-                document.body.getBoundingClientRect();
-            """)
-        except Exception as js_error:
-            logger.warning(f"JavaScript execution for page preparation failed: {str(js_error)}")
-        
-        # Force an explicit wait 
+        # Give the page time to fully load
         logger.info("Waiting 5 seconds for page to stabilize...")
         time.sleep(5)
+        
+        # Scroll to make sure all elements are visible
+        browser.execute_script("window.scrollTo(0, 0);")
+        browser.execute_script("window.scrollTo(0, document.body.scrollHeight/4);")
+        browser.execute_script("window.scrollTo(0, 0);")
         
         # Take a screenshot to see what we're working with
         try:
             take_screenshot(browser, "before_export_button_search")
-        except:
-            pass
+        except Exception as ss_err:
+            logger.warning(f"Failed to take screenshot: {ss_err}")
         
-        # Attempt an ultra-aggressive approach to find and click the export button
-        found_and_clicked = False
-        
-        # Method 1: Try direct selector approach
-        logger.info("Method 1: Using direct CSS selectors...")
-        export_selectors = [
-            "button.btn.btn-sm.m-r-15.export-summary-btn",
-            "button.export-summary-btn", 
-            ".export-csv", 
-            "button:contains('Export')",
-            "button.btn:contains('Export')",
-            "button.btn",
-            "a:contains('Export')"
-        ]
-        
-        for selector in export_selectors:
-            # Check if we've exceeded our wait time
-            if time.time() - start_time > max_wait_time:
-                logger.warning(f"Exceeded max wait time, moving to forceful methods")
-                break
+        # Try the simplest approach first - click via JavaScript using button text
+        logger.info("Trying to find export button via JavaScript")
+        try:
+            found = browser.execute_script("""
+                var buttons = Array.from(document.querySelectorAll('button, a'));
                 
-            try:
-                logger.info(f"Trying selector: {selector}")
-                
-                # Try to find elements via JavaScript for more reliable results
-                elements = browser.execute_script(f"""
-                    return document.querySelectorAll("{selector}");
-                """)
-                
-                if elements and len(elements) > 0:
-                    logger.info(f"Found {len(elements)} potential export buttons with selector: {selector}")
+                // Sort by likelihood of being the export button
+                buttons.sort(function(a, b) {
+                    var aText = a.textContent.toLowerCase();
+                    var bText = b.textContent.toLowerCase();
                     
-                    for element in elements:
-                        try:
-                            logger.info("Attempting to click element via JavaScript...")
-                            browser.execute_script("arguments[0].click();", element)
-                            logger.info("Element clicked via JavaScript")
-                            found_and_clicked = True
-                            time.sleep(2)  # Wait briefly after click
-                            break
-                        except Exception as click_error:
-                            logger.warning(f"Failed to click via JavaScript: {str(click_error)}")
+                    var aScore = 0;
+                    var bScore = 0;
                     
-                    if found_and_clicked:
-                        break
-            except Exception as selector_error:
-                logger.warning(f"Error with selector {selector}: {str(selector_error)}")
-        
-        # Method 2: Brute force approach - try to find by text content
-        if not found_and_clicked and time.time() - start_time <= max_wait_time:
-            logger.info("Method 2: Trying brute force approach, find by text content...")
-            try:
-                result = browser.execute_script("""
-                    var buttons = document.querySelectorAll('button, a');
-                    for (var i = 0; i < buttons.length; i++) {
-                        var btn = buttons[i];
-                        if (btn.innerText && (
-                            btn.innerText.includes('Export') || 
-                            btn.innerText.includes('CSV') ||
-                            btn.innerText.includes('Download')
-                        )) {
-                            console.log("Found button by text: " + btn.innerText);
-                            btn.click();
-                            return true;
-                        }
+                    // Check for the word "export"
+                    if (aText.includes('export')) aScore += 10;
+                    if (bText.includes('export')) bScore += 10;
+                    
+                    // Check for "csv"
+                    if (aText.includes('csv')) aScore += 5;
+                    if (bText.includes('csv')) bScore += 5;
+                    
+                    // Check for "download"
+                    if (aText.includes('download')) aScore += 3;
+                    if (bText.includes('download')) bScore += 3;
+                    
+                    return bScore - aScore;
+                });
+                
+                // Try clicking the most likely buttons
+                for (var i = 0; i < Math.min(buttons.length, 5); i++) {
+                    try {
+                        console.log("Trying to click: " + buttons[i].textContent);
+                        buttons[i].click();
+                        return true;
+                    } catch(e) {
+                        console.log("Failed to click button " + i + ": " + e);
                     }
-                    return false;
-                """)
+                }
                 
-                if result:
-                    logger.info("Successfully clicked export via text search")
-                    found_and_clicked = True
-            except Exception as js_error:
-                logger.warning(f"Text search method failed: {str(js_error)}")
-        
-        # Method 3: XPath approach
-        if not found_and_clicked and time.time() - start_time <= max_wait_time:
-            logger.info("Method 3: Trying XPath selectors...")
-            xpath_selectors = [
-                "//button[contains(text(), 'Export')]",
-                "//button[contains(text(), 'CSV')]",
-                "//a[contains(text(), 'Export')]",
-                "//a[contains(text(), 'CSV')]",
-                "//button[contains(@class, 'export')]",
-                "//a[contains(@class, 'export')]",
-                "//button[contains(@class, 'btn')]",
-                "//div[contains(@class, 'export')]//button"
-            ]
+                return false;
+            """)
             
-            for xpath in xpath_selectors:
-                try:
-                    elements = browser.find_elements(By.XPATH, xpath)
-                    if elements:
-                        logger.info(f"Found {len(elements)} elements with XPath: {xpath}")
-                        for element in elements:
-                            try:
-                                element.click()
-                                logger.info(f"Clicked element with XPath: {xpath}")
-                                found_and_clicked = True
-                                time.sleep(2)
-                                break
-                            except:
+            if found:
+                logger.info("Successfully clicked export button via JavaScript")
+            else:
+                logger.warning("Could not find or click export button via JavaScript")
+                
+                # Fallback to direct selectors
+                export_selectors = [
+                    "button.export-summary-btn",
+                    ".export-summary-btn",
+                    ".export-csv",
+                    "button.btn-primary",
+                    "button.btn.btn-primary"
+                ]
+                
+                for selector in export_selectors:
+                    try:
+                        logger.info(f"Trying selector: {selector}")
+                        elements = browser.find_elements(By.CSS_SELECTOR, selector)
+                        if elements:
+                            logger.info(f"Found {len(elements)} elements with selector: {selector}")
+                            for element in elements:
                                 try:
-                                    browser.execute_script("arguments[0].click();", element)
-                                    logger.info(f"Clicked element with XPath via JavaScript: {xpath}")
-                                    found_and_clicked = True
-                                    time.sleep(2)
+                                    # Try with normal click
+                                    element.click()
+                                    logger.info(f"Clicked element with selector: {selector}")
+                                    found = True
                                     break
                                 except:
-                                    continue
-                    if found_and_clicked:
+                                    # Try with JavaScript click
+                                    try:
+                                        logger.info("Trying JavaScript click")
+                                        browser.execute_script("arguments[0].click();", element)
+                                        logger.info(f"Clicked element with selector via JavaScript: {selector}")
+                                        found = True
+                                        break
+                                    except:
+                                        continue
+                    except Exception as e:
+                        logger.warning(f"Error with selector {selector}: {str(e)}")
+                    
+                    if found:
                         break
-                except Exception as xpath_error:
-                    logger.warning(f"XPath method failed for {xpath}: {str(xpath_error)}")
+        except Exception as js_error:
+            logger.warning(f"JavaScript approach failed: {str(js_error)}")
+            found = False
         
-        # Method 4: Last resort - try tab key navigation and enter
-        if not found_and_clicked and time.time() - start_time <= max_wait_time:
-            logger.info("Method 4: Trying keyboard navigation...")
-            try:
-                # First click on body to ensure focus is in the document
-                browser.find_element(By.TAG_NAME, "body").click()
-                
-                # Send a series of TAB keys to navigate through elements
-                actions = ActionChains(browser)
-                for _ in range(20):  # Try 20 tabs
-                    actions.send_keys(Keys.TAB)
-                actions.perform()
-                
-                # Now send ENTER to try to activate the focused element
-                actions = ActionChains(browser)
-                actions.send_keys(Keys.RETURN)
-                actions.perform()
-                
-                logger.info("Performed keyboard navigation attempt")
-                # We don't know if this worked, but we'll assume it might have
-                found_and_clicked = True
-            except Exception as key_error:
-                logger.warning(f"Keyboard navigation method failed: {str(key_error)}")
-        
-        # Take screenshot after clicking
-        try:
-            take_screenshot(browser, "after_export_attempts")
-        except:
-            pass
-        
-        # Log the outcome
-        if found_and_clicked:
-            logger.info("Export button appears to have been clicked, waiting for download...")
-        else:
-            logger.warning("Could not find or click export button with any method")
-        
-        # Wait for a fixed amount of time for download regardless
+        # Wait for download regardless of whether we think we clicked successfully
         logger.info("Waiting 30 seconds for any download to complete...")
         time.sleep(30)
         
-        # Check for any CSV files
+        # Look for any CSV files
         download_dir = os.path.abspath(os.getcwd())
         csv_files = [f for f in os.listdir(download_dir) if f.endswith('.csv')]
+        
         if csv_files:
             logger.info(f"Found CSV files in directory: {csv_files}")
             logger.info("Assuming download completed successfully")
             return True
         else:
             logger.warning("No CSV files found after waiting")
-            # Always proceed even if no CSV found - we tried our best
-            logger.warning("Proceeding anyway - files may appear later or may have been downloaded elsewhere")
+            # Still return True to continue processing existing files if any
             return True
             
     except Exception as e:
         logger.error(f"Failed to export CSV: {str(e)}")
-        try:
-            take_screenshot(browser, "export_exception")
-        except:
-            pass
-        # Always return True to continue - don't get stuck here
+        # Always continue even if we encounter errors
         return True
 
 def process_csv_file(file_path):
