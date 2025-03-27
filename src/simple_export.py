@@ -398,6 +398,11 @@ def set_date_range(browser, start_date, end_date):
 def click_export_csv(browser):
     """Click the Export CSV button and download the file"""
     try:
+        # Get list of existing CSV files before export attempt (to compare later)
+        download_dir = os.path.abspath(os.getcwd())
+        existing_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
+        logger.info(f"Existing CSV files before export: {existing_csv_files}")
+        
         # Navigate directly to the summary page with export option
         logger.info("Navigating directly to call summary report...")
         try:
@@ -413,6 +418,7 @@ def click_export_csv(browser):
             
         # Try multiple approaches to find and click the export button
         logger.info("Trying multiple approaches to find and click EXPORT CSV button...")
+        export_clicked = False
         
         # Approach 1: Use JavaScript to find and click the button by text content
         try:
@@ -445,6 +451,7 @@ def click_export_csv(browser):
             
             if result:
                 logger.info("Successfully clicked export button via JavaScript")
+                export_clicked = True
                 time.sleep(15)  # Wait for download to start
             else:
                 logger.warning("Could not find export button via JavaScript")
@@ -454,7 +461,7 @@ def click_export_csv(browser):
             take_screenshot(browser, "js_approach_error")
         
         # Approach 2: Try with explicit WebDriverWait and CSS selectors
-        if not result:
+        if not export_clicked:
             try:
                 logger.info("Approach 2: Using WebDriverWait with various CSS selectors")
                 selectors = [
@@ -475,7 +482,7 @@ def click_export_csv(browser):
                         logger.info(f"Found button with selector: {selector}")
                         export_button.click()
                         logger.info("Clicked the export button")
-                        result = True
+                        export_clicked = True
                         time.sleep(15)  # Wait for download to start
                         break
                     except Exception as e:
@@ -486,7 +493,7 @@ def click_export_csv(browser):
                 take_screenshot(browser, "explicit_selectors_error")
         
         # Approach 3: Try with XPath to find buttons containing text
-        if not result:
+        if not export_clicked:
             try:
                 logger.info("Approach 3: Using XPath to find buttons by text content")
                 xpaths = [
@@ -506,7 +513,7 @@ def click_export_csv(browser):
                         logger.info(f"Found button with XPath: {xpath}")
                         export_button.click()
                         logger.info("Clicked the export button")
-                        result = True
+                        export_clicked = True
                         time.sleep(15)  # Wait for download to start
                         break
                     except Exception as e:
@@ -519,39 +526,56 @@ def click_export_csv(browser):
         # Take screenshot after export attempt
         take_screenshot(browser, "after_export_attempt")
         
-        # Wait for download to complete, regardless of whether we know we clicked successfully
+        if not export_clicked:
+            logger.error("Failed to click export button with any method")
+            return None
+            
+        # Wait for download to complete
         logger.info("Waiting for download to complete...")
-        time.sleep(45)  # Wait longer to ensure download completes
         
-        # Look for any CSV files
-        download_dir = os.path.abspath(os.getcwd())
-        csv_files = [f for f in os.listdir(download_dir) if f.endswith('.csv')]
+        # Wait longer to ensure download completes (90 seconds)
+        max_wait_time = 90
+        start_time = time.time()
+        new_file = None
         
-        if csv_files:
-            # Sort by creation time
-            csv_files.sort(key=lambda x: os.path.getctime(os.path.join(download_dir, x)), reverse=True)
-            latest_csv = csv_files[0]
-            logger.info(f"Found latest CSV file: {latest_csv}")
+        while time.time() - start_time < max_wait_time:
+            # Check for new CSV files
+            current_csv_files = set([f for f in os.listdir(download_dir) if f.endswith('.csv')])
+            new_csv_files = current_csv_files - existing_csv_files
             
-            # Check if it's a newly created file (within last 5 minutes)
-            file_path = os.path.join(download_dir, latest_csv)
-            file_creation_time = os.path.getctime(file_path)
-            current_time = time.time()
-            
-            if current_time - file_creation_time < 300:  # 5 minutes
-                logger.info(f"Using newly created CSV file: {latest_csv}")
-                return file_path
-            else:
-                logger.warning(f"CSV file {latest_csv} is not recent (created {(current_time - file_creation_time)/60:.1f} minutes ago)")
+            if new_csv_files:
+                logger.info(f"New CSV files detected: {new_csv_files}")
+                # Get the most recently created file
+                newest_file = max(new_csv_files, key=lambda f: os.path.getctime(os.path.join(download_dir, f)))
+                new_file = os.path.join(download_dir, newest_file)
+                logger.info(f"Found newly downloaded CSV file: {newest_file}")
+                break
                 
-        # Return the most recent CSV file even if it's old
-        if csv_files:
-            latest_csv = csv_files[0]
-            logger.info(f"Using existing CSV file as fallback: {latest_csv}")
-            return os.path.join(download_dir, latest_csv)
+            # Wait a bit before checking again
+            logger.info(f"Waiting for download... ({int(time.time() - start_time)} seconds elapsed)")
+            time.sleep(5)
             
-        logger.warning("No CSV files found after waiting")
-        return None
+        if not new_file:
+            logger.error("No new CSV file detected after waiting. Download may have failed.")
+            return None
+            
+        # Verify file is not empty and is a valid CSV
+        try:
+            file_size = os.path.getsize(new_file)
+            logger.info(f"CSV file size: {file_size} bytes")
+            
+            if file_size == 0:
+                logger.error("CSV file is empty")
+                return None
+                
+            # Check if file is valid CSV by opening with pandas
+            df = pd.read_csv(new_file)
+            logger.info(f"CSV file successfully loaded with {len(df)} rows and {len(df.columns)} columns")
+            
+            return new_file
+        except Exception as e:
+            logger.error(f"Error validating CSV file: {str(e)}")
+            return None
             
     except Exception as e:
         logger.error(f"Failed to export CSV: {str(e)}")
@@ -1298,23 +1322,95 @@ def export_csv():
             return False
 
         # Click Export CSV
-        csv_file_path = click_export_csv(browser)
-        if not csv_file_path:
-            logger.error("Failed to export CSV file")
-            return False
+        max_retries = 3
+        csv_file_path = None
+        
+        for attempt in range(max_retries):
+            logger.info(f"Export attempt {attempt+1}/{max_retries}")
+            csv_file_path = click_export_csv(browser)
             
-        logger.info(f"Exported CSV file: {csv_file_path}")
+            if csv_file_path:
+                logger.info(f"Successfully exported CSV file: {csv_file_path}")
+                break
+            elif attempt < max_retries - 1:
+                logger.warning(f"Export attempt {attempt+1} failed, retrying...")
+                time.sleep(5)  # Wait before retry
+            else:
+                logger.error("All export attempts failed")
+        
+        if not csv_file_path:
+            logger.error("Failed to export CSV file after all attempts")
+            # Send notification to Slack about the failure
+            try:
+                error_message = {
+                    "blocks": [
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": f"{run_type} Run Failed - Could Not Export CSV"
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "The script was unable to download the CSV file from Ringba. Please check the logs and Ringba account."
+                            }
+                        }
+                    ]
+                }
+                
+                webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+                if webhook_url:
+                    requests.post(webhook_url, json=error_message)
+                    logger.info("Sent failure notification to Slack")
+            except Exception as err:
+                logger.error(f"Failed to send failure notification: {str(err)}")
+                
+            return False
 
         # Process the CSV file
         low_rpc_targets = process_csv_file(csv_file_path)
         if not low_rpc_targets:
             logger.info("No low RPC targets found")
+            # Send a notification to Slack that no targets were found
+            try:
+                no_targets_message = {
+                    "blocks": [
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": f"{run_type} Report - No Targets Below Threshold"
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🎉 Great news! No targets were found below the RPC threshold."
+                            }
+                        }
+                    ]
+                }
+                
+                webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+                if webhook_url:
+                    requests.post(webhook_url, json=no_targets_message)
+                    logger.info("Sent 'no targets' notification to Slack")
+            except Exception as err:
+                logger.error(f"Failed to send 'no targets' notification: {str(err)}")
+                
             return True
 
         # Send to Slack
-        send_to_slack(low_rpc_targets, run_type)
-        
-        return True
+        if send_to_slack(low_rpc_targets, run_type):
+            logger.info(f"Successfully sent {run_type} report to Slack")
+            return True
+        else:
+            logger.error("Failed to send report to Slack")
+            return False
     except Exception as e:
         logger.error(f"Failed to export CSV: {str(e)}")
         return False
