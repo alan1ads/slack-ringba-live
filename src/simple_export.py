@@ -439,82 +439,210 @@ def click_export_csv(browser):
         # Take screenshot to see page state
         take_screenshot(browser, "before_export_attempt")
         
-        # Set up network interception to capture download URL
-        logger.info("Setting up network request interception to capture the download URL")
-        download_url = None
+        # First try: Use direct URL to export data
+        logger.info("Trying direct API URL approach for export...")
+        try:
+            # Try to directly access the export API endpoint with proper authentication
+            # Get cookies from the browser
+            cookies = {}
+            for cookie in browser.get_cookies():
+                cookies[cookie['name']] = cookie['value']
+            
+            # Try to find a token in the page source or cookies
+            token = None
+            for cookie_name in ['auth_token', 'token', 'jwt', 'accessToken']:
+                if cookie_name in cookies:
+                    token = cookies[cookie_name]
+                    logger.info(f"Found potential auth token: {cookie_name}")
+                    break
+            
+            # If not in cookies, try to extract from localStorage
+            if not token:
+                try:
+                    local_storage = browser.execute_script("return localStorage.getItem('token') || localStorage.getItem('auth_token') || localStorage.getItem('jwt') || localStorage.getItem('accessToken');")
+                    if local_storage:
+                        token = local_storage
+                        logger.info("Found token in localStorage")
+                except Exception as e:
+                    logger.warning(f"Error accessing localStorage: {str(e)}")
+            
+            # Try to extract CSRF token if available
+            csrf_token = None
+            try:
+                csrf_token = browser.execute_script("""
+                    return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || 
+                           document.querySelector('input[name="_csrf"]')?.value ||
+                           document.querySelector('input[name="csrf_token"]')?.value;
+                """)
+                if csrf_token:
+                    logger.info(f"Found CSRF token: {csrf_token[:10]}...")
+            except Exception as e:
+                logger.warning(f"Error getting CSRF token: {str(e)}")
+            
+            # Try to infer the account ID from the current URL
+            account_id = RINGBA_ACCOUNT_ID  # Default from env var
+            try:
+                current_url = browser.current_url
+                # Try to extract account ID from URL
+                import re
+                url_account_match = re.search(r'/account/([^/]+)', current_url)
+                if url_account_match:
+                    account_id = url_account_match.group(1)
+                    logger.info(f"Extracted account ID from URL: {account_id}")
+            except Exception as e:
+                logger.warning(f"Error extracting account ID from URL: {str(e)}")
+            
+            # Headers for API request
+            headers = {
+                'User-Agent': browser.execute_script("return navigator.userAgent;"),
+                'Accept': 'text/csv,application/csv,text/plain,application/json',
+                'Content-Type': 'application/json'
+            }
+            
+            # Add authorization if token was found
+            if token:
+                headers['Authorization'] = f'Bearer {token}'
+            
+            # Add CSRF token if found
+            if csrf_token:
+                headers['X-CSRF-Token'] = csrf_token
+            
+            # Try common API export endpoints
+            export_urls = [
+                f"https://app.ringba.com/api/reports/export?format=csv&account={account_id}",
+                f"https://app.ringba.com/api/v2/call-logs/export?format=csv&account={account_id}",
+                f"https://app.ringba.com/api/export/calls?format=csv&account={account_id}",
+                f"https://app.ringba.com/api/dashboard/call-logs/export?format=csv&account={account_id}"
+            ]
+            
+            for export_url in export_urls:
+                logger.info(f"Attempting export from: {export_url}")
+                try:
+                    response = requests.get(export_url, headers=headers, cookies=cookies, timeout=30)
+                    
+                    if response.status_code == 200:
+                        # Check if it looks like CSV content
+                        content = response.content
+                        if content.startswith(b'"') or content.startswith(b'Target') or b',' in content:
+                            # Looks like CSV data
+                            download_dir = "/tmp"
+                            os.makedirs(download_dir, exist_ok=True)
+                            file_path = os.path.join(download_dir, f"ringba_direct_export_{int(time.time())}.csv")
+                            
+                            with open(file_path, 'wb') as f:
+                                f.write(content)
+                            
+                            logger.info(f"Successfully downloaded CSV directly to {file_path}")
+                            
+                            # Verify it's a valid CSV
+                            try:
+                                df = pd.read_csv(file_path)
+                                logger.info(f"CSV file has {len(df)} rows and {len(df.columns)} columns")
+                                return file_path
+                            except Exception as e:
+                                logger.warning(f"Downloaded file is not a valid CSV: {str(e)}")
+                        else:
+                            logger.warning(f"Response doesn't look like CSV: {content[:100]}...")
+                except Exception as e:
+                    logger.warning(f"Error with export URL {export_url}: {str(e)}")
+        except Exception as e:
+            logger.warning(f"Direct API approach failed: {str(e)}")
         
-        # Inject JavaScript to watch for network requests
+        # Second try: Click the export button and use more aggressive data interception
+        logger.info("Clicking export button and using enhanced interception...")
+        
+        # Set up a more aggressive network interception
+        logger.info("Setting up enhanced network interception...")
         browser.execute_script("""
-            window.downloadUrls = [];
+            // Store all network responses
+            window.networkResponses = [];
             
-            // Create a proxy for the original XMLHttpRequest
-            const originalXhrOpen = XMLHttpRequest.prototype.open;
-            const originalXhrSend = XMLHttpRequest.prototype.send;
+            // Patch XMLHttpRequest
+            const originalXHROpen = XMLHttpRequest.prototype.open;
+            const originalXHRSend = XMLHttpRequest.prototype.send;
             
-            // Override open method to capture URL
-            XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-                this._url = url;
-                return originalXhrOpen.apply(this, arguments);
+            XMLHttpRequest.prototype.open = function() {
+                this._url = arguments[1];
+                this._method = arguments[0];
+                return originalXHROpen.apply(this, arguments);
             };
             
-            // Override send method to capture response
-            XMLHttpRequest.prototype.send = function(data) {
+            XMLHttpRequest.prototype.send = function() {
                 const xhr = this;
-                const originalOnReadyStateChange = xhr.onreadystatechange;
-                
-                xhr.onreadystatechange = function() {
-                    if (xhr.readyState === 4) {
-                        // Check if this is a CSV download (by URL or content type)
-                        if (xhr._url && (
-                            xhr._url.includes('export') || 
-                            xhr._url.includes('csv') ||
-                            (xhr.getResponseHeader('Content-Type') && 
-                             xhr.getResponseHeader('Content-Type').includes('csv'))
-                           )) {
-                            window.downloadUrls.push({
-                                url: xhr._url,
-                                contentType: xhr.getResponseHeader('Content-Type'),
-                                status: xhr.status
-                            });
-                            console.log('Captured potential download URL:', xhr._url);
+                this.addEventListener('load', function() {
+                    try {
+                        window.networkResponses.push({
+                            url: xhr._url,
+                            method: xhr._method,
+                            status: xhr.status,
+                            contentType: xhr.getResponseHeader('Content-Type'),
+                            responseType: xhr.responseType,
+                            responseText: xhr.responseType === 'text' || xhr.responseType === '' ? xhr.responseText : '[binary]',
+                            timestamp: Date.now()
+                        });
+                        
+                        console.log('Captured response:', xhr._url);
+                    } catch(e) {
+                        console.error('Error capturing XHR:', e);
+                    }
+                });
+                return originalXHRSend.apply(this, arguments);
+            };
+            
+            // Also intercept links - useful for export buttons that navigate to download URLs
+            document.addEventListener('click', function(e) {
+                var target = e.target;
+                // Check if it's a link or button or has a parent that is
+                while (target && target !== document) {
+                    if (target.tagName === 'A' || 
+                        target.tagName === 'BUTTON' || 
+                        target.getAttribute('role') === 'button' ||
+                        target.classList.contains('btn') ||
+                        target.classList.contains('button')) {
+                        
+                        // Record detailed info about the click
+                        var href = target.getAttribute('href');
+                        var onclick = target.getAttribute('onclick');
+                        var text = target.textContent.trim();
+                        
+                        console.log('Intercepted click on:', {
+                            element: target.tagName,
+                            href: href,
+                            text: text,
+                            classes: target.className,
+                            id: target.id
+                        });
+                        
+                        // If it's an export button or link, record extra details
+                        if ((href && (href.includes('export') || href.includes('download'))) ||
+                            (text && (text.toLowerCase().includes('export') || text.toLowerCase().includes('csv'))) ||
+                            (onclick && (onclick.includes('export') || onclick.includes('download')))) {
+                            
+                            window.lastExportClick = {
+                                element: target.tagName,
+                                href: href,
+                                text: text,
+                                classes: target.className,
+                                id: target.id,
+                                timestamp: Date.now()
+                            };
+                            console.log('Export button/link clicked:', window.lastExportClick);
                         }
                     }
-                    
-                    if (originalOnReadyStateChange) {
-                        originalOnReadyStateChange.apply(this, arguments);
-                    }
-                };
-                
-                return originalXhrSend.apply(this, arguments);
-            };
-            
-            // Also monitor fetch requests
-            const originalFetch = window.fetch;
-            window.fetch = function(input, init) {
-                return originalFetch(input, init).then(response => {
-                    const url = typeof input === 'string' ? input : input.url;
-                    
-                    // Check if this might be a CSV download
-                    if (url && (url.includes('export') || url.includes('csv'))) {
-                        window.downloadUrls.push({
-                            url: url,
-                            contentType: response.headers.get('Content-Type'),
-                            status: response.status
-                        });
-                        console.log('Captured potential download URL (fetch):', url);
-                    }
-                    
-                    return response;
-                });
-            };
+                    target = target.parentElement;
+                }
+            }, true);
         """)
         
         # Now click the export button
+        logger.info("Looking for the EXPORT CSV button with multiple approaches...")
+        
         export_clicked = False
         
-        try:
-            logger.info("Using JavaScript to find and click EXPORT CSV button")
-            result = browser.execute_script("""
+        # Try multiple ways to find and click the export button
+        approaches = [
+            # 1. JavaScript approach to find by text content
+            lambda: browser.execute_script("""
                 // Find all buttons/spans that contain 'export' or 'csv'
                 var buttons = [];
                 document.querySelectorAll('button, span, a, div').forEach(function(el) {
@@ -525,7 +653,6 @@ def click_export_csv(browser):
                     }
                 });
                 
-                // Log findings
                 console.log("Found " + buttons.length + " potential export buttons");
                 buttons.forEach(function(b, i) { 
                     console.log(i + ": " + b.textContent.trim() + " - " + b.tagName); 
@@ -536,125 +663,171 @@ def click_export_csv(browser):
                     buttons[0].click();
                     return true;
                 }
-                
                 return false;
-            """)
+            """),
             
-            if result:
-                logger.info("Successfully clicked export button via JavaScript")
-                export_clicked = True
-                time.sleep(15)  # Wait for network requests to be captured
-            else:
-                logger.warning("Could not find export button via JavaScript")
-        except Exception as e:
-            logger.error(f"Error with JavaScript click approach: {str(e)}")
+            # 2. CSS selector approach
+            lambda: browser.find_element(By.CSS_SELECTOR, 'button[title*="Export"], span[title*="Export"], a[title*="Export"]').click() or True,
+            
+            # 3. XPath approach
+            lambda: browser.find_element(By.XPATH, '//button[contains(text(), "Export") or contains(text(), "CSV")] | //span[contains(text(), "Export") or contains(text(), "CSV")]').click() or True,
+            
+            # 4. Data attribute approach
+            lambda: browser.find_element(By.CSS_SELECTOR, '[data-testid*="export"], [data-cy*="export"], [data-qa*="export"]').click() or True
+        ]
         
-        # Take screenshot after export attempt
-        take_screenshot(browser, "after_export_attempt")
+        for i, approach in enumerate(approaches):
+            try:
+                logger.info(f"Trying export button approach #{i+1}")
+                result = approach()
+                if result:
+                    logger.info(f"Successfully clicked export button with approach #{i+1}")
+                    export_clicked = True
+                    break
+            except Exception as e:
+                logger.warning(f"Export button approach #{i+1} failed: {str(e)}")
         
         if export_clicked:
-            # Check if we captured any download URLs
-            try:
-                # Wait a bit longer for any requests to complete
-                time.sleep(15)
+            # Wait for any download process to complete
+            logger.info("Export button clicked, waiting for data...")
+            time.sleep(20)  # Wait longer for any responses to be captured
+            
+            # Take screenshot after clicking
+            take_screenshot(browser, "after_export_click")
+            
+            # Check for intercepted network responses
+            responses = browser.execute_script("return window.networkResponses || [];")
+            logger.info(f"Captured {len(responses)} network responses")
+            
+            # Look for any that might be CSV data
+            csv_responses = []
+            for resp in responses:
+                url = resp.get('url', '')
+                content_type = resp.get('contentType', '')
                 
-                download_info = browser.execute_script("return window.downloadUrls;")
-                logger.info(f"Captured download URLs: {download_info}")
+                if ('export' in url.lower() or 'csv' in url.lower() or 
+                    (content_type and ('csv' in content_type.lower() or 'text/plain' in content_type.lower()))):
+                    csv_responses.append(resp)
+                    logger.info(f"Potential CSV response: {url} ({content_type})")
+            
+            if csv_responses:
+                # Sort by timestamp - most recent first
+                csv_responses.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+                latest_resp = csv_responses[0]
                 
-                if download_info and len(download_info) > 0:
-                    # Get the last URL (most likely to be our download)
-                    last_download = download_info[-1]
-                    download_url = last_download['url']
-                    logger.info(f"Using download URL: {download_url}")
-                    
-                    # Make a direct request to download the CSV
-                    if download_url:
+                # If it has response text that looks like CSV
+                if 'responseText' in latest_resp and latest_resp['responseText'] != '[binary]':
+                    text = latest_resp['responseText']
+                    if ',' in text and ('\n' in text or '\r' in text):  # Basic check for CSV format
+                        # Save to file
+                        download_dir = "/tmp"
+                        os.makedirs(download_dir, exist_ok=True)
+                        file_path = os.path.join(download_dir, f"ringba_intercepted_{int(time.time())}.csv")
+                        
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(text)
+                        
+                        logger.info(f"Saved intercepted CSV data to {file_path}")
+                        
+                        # Verify it's a valid CSV
+                        try:
+                            df = pd.read_csv(file_path)
+                            logger.info(f"Intercepted CSV has {len(df)} rows and {len(df.columns)} columns")
+                            return file_path
+                        except Exception as e:
+                            logger.error(f"Intercepted file is not a valid CSV: {str(e)}")
+            
+            # If we didn't find a direct CSV response, check if any download links were clicked
+            export_click = browser.execute_script("return window.lastExportClick;")
+            if export_click:
+                logger.info(f"Export click details: {export_click}")
+                href = export_click.get('href')
+                
+                if href:
+                    logger.info(f"Attempting to download from link: {href}")
+                    try:
                         # If it's a relative URL, make it absolute
-                        if download_url.startswith('/'):
+                        if href.startswith('/'):
                             base_url = browser.current_url.split('#')[0]
-                            download_url = base_url + download_url
-                        
-                        logger.info(f"Making direct request to download URL: {download_url}")
-                        
+                            href = base_url + href
+                            
                         # Get cookies from browser to use in request
                         cookies = {}
                         for cookie in browser.get_cookies():
                             cookies[cookie['name']] = cookie['value']
                         
-                        # Make the request
+                        # Make a direct request to the URL
                         response = requests.get(
-                            download_url, 
+                            href, 
                             cookies=cookies, 
-                            headers={
-                                'User-Agent': browser.execute_script("return navigator.userAgent;"),
-                                'Accept': 'text/csv,application/csv,text/plain'
-                            }
+                            headers={'User-Agent': browser.execute_script("return navigator.userAgent;")},
+                            timeout=30
                         )
                         
                         if response.status_code == 200:
-                            # Save the content to a file in /tmp
                             download_dir = "/tmp"
                             os.makedirs(download_dir, exist_ok=True)
-                            file_path = os.path.join(download_dir, f"ringba_export_{int(time.time())}.csv")
+                            file_path = os.path.join(download_dir, f"ringba_link_download_{int(time.time())}.csv")
                             
                             with open(file_path, 'wb') as f:
                                 f.write(response.content)
                             
-                            logger.info(f"Successfully downloaded CSV to {file_path}")
+                            logger.info(f"Downloaded link content to {file_path}")
                             
-                            # Verify it's a valid CSV
+                            # Check if it's a valid CSV
                             try:
                                 df = pd.read_csv(file_path)
-                                logger.info(f"CSV file has {len(df)} rows and {len(df.columns)} columns")
+                                logger.info(f"Link download CSV has {len(df)} rows and {len(df.columns)} columns")
                                 return file_path
                             except Exception as e:
-                                logger.error(f"Downloaded file is not a valid CSV: {str(e)}")
-                        else:
-                            logger.error(f"Failed to download CSV. Status code: {response.status_code}")
-            except Exception as e:
-                logger.error(f"Error processing download URLs: {str(e)}")
+                                logger.error(f"Link download is not a valid CSV: {str(e)}")
+                    except Exception as e:
+                        logger.error(f"Error downloading from link: {str(e)}")
         
-        # If we haven't returned by now, try one more approach - downloading via browser
-        logger.info("Trying final approach: direct page export...")
+        # Third approach: Grab data directly from page
+        logger.info("Attempting to extract data directly from page...")
         try:
-            # Get the page source to see if it contains our data
+            # Try to find any displayed tables with data using Pandas read_html
             page_source = browser.page_source
             
-            # Very simplified approach - save the page source if it seems to contain table data
-            if '<table' in page_source and ('rpc' in page_source.lower() or 'revenue per call' in page_source.lower()):
-                download_dir = "/tmp"
-                os.makedirs(download_dir, exist_ok=True)
-                file_path = os.path.join(download_dir, f"ringba_page_source_{int(time.time())}.html")
+            # Save the page source for debugging
+            download_dir = "/tmp"
+            os.makedirs(download_dir, exist_ok=True)
+            html_path = os.path.join(download_dir, f"ringba_page_{int(time.time())}.html")
+            
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(page_source)
+            
+            logger.info(f"Saved page source to {html_path}")
+            
+            # Extract tables
+            tables = pd.read_html(html_path)
+            if tables and len(tables) > 0:
+                logger.info(f"Found {len(tables)} tables in the page")
                 
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(page_source)
+                # Use the largest table
+                largest_table = max(tables, key=lambda t: len(t) * len(t.columns) if not t.empty else 0)
                 
-                logger.info(f"Saved page source to {file_path}")
-                
-                # Try to convert HTML page to CSV
-                logger.info("Converting HTML table to CSV...")
-                
-                # Use pandas to read HTML tables
-                tables = pd.read_html(file_path)
-                if tables and len(tables) > 0:
-                    # Find the largest table
-                    largest_table = max(tables, key=lambda t: len(t) * len(t.columns) if len(t) > 0 else 0)
-                    
+                if not largest_table.empty:
                     # Save as CSV
-                    csv_path = os.path.join(download_dir, f"ringba_table_{int(time.time())}.csv")
+                    csv_path = os.path.join(download_dir, f"ringba_table_extract_{int(time.time())}.csv")
                     largest_table.to_csv(csv_path, index=False)
                     
-                    logger.info(f"Successfully converted HTML table to CSV with {len(largest_table)} rows")
+                    logger.info(f"Extracted table to CSV: {csv_path} with {len(largest_table)} rows")
                     return csv_path
+                else:
+                    logger.warning("Largest table is empty")
+            else:
+                logger.warning("No tables found in the page")
         except Exception as e:
-            logger.error(f"Failed to extract from page source: {str(e)}")
+            logger.error(f"Error extracting data from page: {str(e)}")
         
         logger.error("All download attempts failed")
         return None
     
     except Exception as e:
-        logger.error(f"Failed to download CSV: {str(e)}")
-        take_screenshot(browser, "download_error")
+        logger.error(f"Failed to export CSV: {str(e)}")
+        take_screenshot(browser, "export_error")
         return None
 
 def process_csv_file(file_path):
