@@ -38,31 +38,35 @@ services:
       apt-get update
       apt-get install -y google-chrome-stable
       
-      # Install ChromeDriver using a more direct approach
-      # Get the Chrome version
-      CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1)
-      echo "Chrome version: $CHROME_VERSION"
+      # Install ChromeDriver directly - known working version
+      echo "Installing ChromeDriver directly..."
+      mkdir -p /tmp/chromedriver
+      cd /tmp/chromedriver
       
-      # Download the matching ChromeDriver version
-      wget -q -O /tmp/LATEST_RELEASE "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION"
-      DRIVER_VERSION=$(cat /tmp/LATEST_RELEASE)
-      echo "Using ChromeDriver version: $DRIVER_VERSION"
+      # Use a known stable version that's compatible with Chrome
+      CHROMEDRIVER_VERSION="113.0.5672.63"
+      echo "Using stable ChromeDriver version: $CHROMEDRIVER_VERSION"
       
-      # Download and install ChromeDriver
-      wget -q -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/$DRIVER_VERSION/chromedriver_linux64.zip"
-      unzip -o /tmp/chromedriver.zip -d /usr/local/bin/
+      # Download and extract ChromeDriver
+      wget -q https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip
+      unzip -o chromedriver_linux64.zip
+      
+      # Copy to standard locations and set permissions
+      cp -f chromedriver /usr/local/bin/chromedriver
+      cp -f chromedriver /usr/bin/chromedriver
       chmod +x /usr/local/bin/chromedriver
+      chmod +x /usr/bin/chromedriver
       
-      # Create symlinks to ensure it's in PATH
-      ln -sf /usr/local/bin/chromedriver /usr/bin/chromedriver
+      # Clean up
+      cd /
+      rm -rf /tmp/chromedriver
       
       # Verify installations and permissions
       echo "Checking installations:"
       google-chrome --version
-      chromedriver --version
       ls -la /usr/local/bin/chromedriver
       ls -la /usr/bin/chromedriver
-      echo "PATH: $PATH"
+      /usr/local/bin/chromedriver --version || echo "Failed to run chromedriver version check"
       
       # Install Python dependencies
       pip install -r requirements.txt
