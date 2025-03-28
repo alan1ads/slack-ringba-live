@@ -440,7 +440,7 @@ def click_export_csv(browser):
         take_screenshot(browser, "before_export_attempt")
         
         # NEW: Add JavaScript that intercepts blob URLs and download events 
-        logger.info("Setting up enhanced Blob URL interception...")
+        logger.info("Setting up blob URL interception...")
         browser.execute_script("""
             // Store blob URLs and download data
             window.blobUrls = [];
@@ -557,16 +557,9 @@ def click_export_csv(browser):
             except Exception as e:
                 logger.warning(f"Error checking directory {d}: {str(e)}")
         
-        # Continue with existing code for tracking download activity
-        logger.info("Setting up Chrome for reliable downloads in container...")
+        # Setup download tracking without modifying userAgent
+        logger.info("Setting up download tracking...")
         browser.execute_script("""
-            // Force download behavior in Chrome
-            Object.defineProperty(navigator, 'userAgent', {
-                get: function () {
-                    return 'Mozilla/5.0 (X11; Linux x86_64) Chrome/134.0.0.0';  // Container Chrome version
-                }
-            });
-            
             // Track download activity
             window.downloadActivity = {
                 clicked: false,
@@ -629,8 +622,35 @@ def click_export_csv(browser):
             };
         """)
         
-        # Setup Chrome network monitoring to track download requests
+        # Try direct API approach for getting call logs
+        # Use CDP protocol to monitor network requests and intercept the API response
+        logger.info("Setting up network interception for API monitoring...")
         browser.execute_cdp_cmd('Network.enable', {})
+        browser.execute_cdp_cmd('Network.setRequestInterception', {'patterns': [{'urlPattern': '**/ringba/call-logs*', 'resourceType': 'XHR', 'interceptionStage': 'HeadersReceived'}]})
+        
+        # Create a variable to store API data
+        browser.execute_script("""
+            window.apiResponses = [];
+            window.callLogsData = null;
+        """)
+        
+        # Track network responses for call logs API
+        browser.execute_cdp_cmd('Network.requestIntercepted', lambda params: browser.execute_cdp_cmd('Network.getResponseBodyForInterception', 
+            {'interceptionId': params['interceptionId']}).then(
+                lambda body: browser.execute_script("""
+                    try {
+                        const data = JSON.parse(arguments[0]);
+                        console.log('Intercepted API response with ' + (data.length || 0) + ' items');
+                        window.apiResponses.push({
+                            timestamp: Date.now(),
+                            data: data
+                        });
+                        window.callLogsData = data;
+                    } catch(e) {
+                        console.error('Failed to parse API data:', e);
+                    }
+                """, body['body'])
+            ))
         
         # Click the export button
         export_clicked = False
@@ -781,6 +801,34 @@ def click_export_csv(browser):
                 except Exception as e:
                     logger.warning(f"Blob data is not a valid CSV: {str(e)}")
             
+            # NEW: Check for intercepted API data
+            api_data = browser.execute_script("return window.callLogsData;")
+            if api_data:
+                logger.info("Found call logs data from API interception!")
+                
+                # Convert API data to DataFrame and save as CSV
+                try:
+                    # Save API data to file
+                    file_path = os.path.join("/tmp", f"api_data_{int(time.time())}.csv")
+                    
+                    # Convert JSON array to string to save
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(str(api_data))
+                    
+                    logger.info(f"Saved raw API data to {file_path}")
+                    
+                    # Try to convert to DataFrame and save as CSV
+                    api_file_path = os.path.join("/tmp", f"api_data_processed_{int(time.time())}.csv")
+                    
+                    # Convert API data to DataFrame
+                    df = pd.DataFrame(api_data)
+                    df.to_csv(api_file_path, index=False)
+                    
+                    logger.info(f"Successfully converted API data to CSV with {len(df)} rows")
+                    return api_file_path
+                except Exception as e:
+                    logger.warning(f"Failed to process API data: {str(e)}")
+            
             # Check if there are any new CSV files in the download directories
             new_files = []
             
@@ -830,68 +878,8 @@ def click_export_csv(browser):
         
         logger.warning("No new CSV files found after waiting")
         
-        # Try the Ringba API as fallback - keep existing code
-        logger.info("Trying Ringba API as fallback...")
-        try:
-            api_token = os.getenv('RINGBA_API_TOKEN')
-            account_id = os.getenv('RINGBA_ACCOUNT_ID')
-            
-            if api_token and account_id:
-                # Get today's date range for the API query
-                today = datetime.now()
-                start_date = today.strftime('%Y-%m-%d')
-                end_date = today.strftime('%Y-%m-%d')
-                
-                # Use Ringba API to get call data
-                headers = {
-                    'Authorization': f'Bearer {api_token}',
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                }
-                
-                # Try the call logs API endpoint
-                call_logs_url = f"https://api.ringba.com/v2/ringba/accounts/{account_id}/call-logs"
-                params = {
-                    'startDate': start_date,
-                    'endDate': end_date,
-                    'format': 'csv'
-                }
-                
-                logger.info(f"Making API request to: {call_logs_url}")
-                response = requests.get(call_logs_url, headers=headers, params=params)
-                
-                if response.status_code == 200:
-                    logger.info("Successfully retrieved data from Ringba API")
-                    
-                    # Save response content to a CSV file
-                    download_dir = "/tmp"
-                    os.makedirs(download_dir, exist_ok=True)
-                    file_path = os.path.join(download_dir, f"ringba_api_{int(time.time())}.csv")
-                    
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(response.text)
-                    
-                    logger.info(f"Saved API response to {file_path}")
-                    
-                    # Verify it's a valid CSV
-                    try:
-                        df = pd.read_csv(file_path)
-                        logger.info(f"API CSV has {len(df)} rows and {len(df.columns)} columns")
-                        return file_path
-                    except Exception as e:
-                        logger.warning(f"API response not a valid CSV: {str(e)}")
-                else:
-                    logger.warning(f"API call failed with status {response.status_code}: {response.text}")
-            else:
-                logger.warning("Missing API token or account ID, can't use API fallback")
-        except Exception as e:
-            logger.error(f"Error using Ringba API: {str(e)}")
-        
-        # Keep existing page extraction code
-        # If we get here, try to extract data directly from the page as last resort
-        logger.info("Trying to extract data directly from page as final fallback...")
-        
-        # The extraction script is similar to before but more thorough
+        # NEW: Try to extract data directly from the table on the page
+        logger.info("No downloads found. Attempting to extract data directly from the page...")
         table_data = browser.execute_script("""
             // Find any data tables on the page
             const tables = document.querySelectorAll('table');
@@ -1006,6 +994,63 @@ def click_export_csv(browser):
             logger.info(f"Saved extracted data to {file_path}")
             return file_path
         
+        # Try the Ringba API as fallback
+        logger.info("Trying Ringba API as fallback...")
+        try:
+            api_token = os.getenv('RINGBA_API_TOKEN')
+            account_id = os.getenv('RINGBA_ACCOUNT_ID')
+            
+            if api_token and account_id:
+                # Get today's date range for the API query
+                today = datetime.now()
+                start_date = today.strftime('%Y-%m-%d')
+                end_date = today.strftime('%Y-%m-%d')
+                
+                # Use Ringba API to get call data
+                headers = {
+                    'Authorization': f'Bearer {api_token}',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+                
+                # Try the call logs API endpoint
+                call_logs_url = f"https://api.ringba.com/v2/ringba/accounts/{account_id}/call-logs"
+                params = {
+                    'startDate': start_date,
+                    'endDate': end_date,
+                    'format': 'csv'
+                }
+                
+                logger.info(f"Making API request to: {call_logs_url}")
+                response = requests.get(call_logs_url, headers=headers, params=params)
+                
+                if response.status_code == 200:
+                    logger.info("Successfully retrieved data from Ringba API")
+                    
+                    # Save response content to a CSV file
+                    download_dir = "/tmp"
+                    os.makedirs(download_dir, exist_ok=True)
+                    file_path = os.path.join(download_dir, f"ringba_api_{int(time.time())}.csv")
+                    
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(response.text)
+                    
+                    logger.info(f"Saved API response to {file_path}")
+                    
+                    # Verify it's a valid CSV
+                    try:
+                        df = pd.read_csv(file_path)
+                        logger.info(f"API CSV has {len(df)} rows and {len(df.columns)} columns")
+                        return file_path
+                    except Exception as e:
+                        logger.warning(f"API response not a valid CSV: {str(e)}")
+                else:
+                    logger.warning(f"API call failed with status {response.status_code}: {response.text}")
+            else:
+                logger.warning("Missing API token or account ID, can't use API fallback")
+        except Exception as e:
+            logger.error(f"Error using Ringba API: {str(e)}")
+            
         # If all methods fail, give up
         logger.error("All methods to export CSV have failed")
         return None
