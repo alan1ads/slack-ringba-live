@@ -1,85 +1,54 @@
-FROM python:3.11-slim
+FROM python:3.9-slim
 
-# Install Chrome and dependencies
+# Install basic dependencies
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libatspi2.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
-    xdg-utils \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update && apt-get install -y \
-    google-chrome-stable \
+    wget gnupg curl unzip git \
+    fonts-liberation libasound2 libatk-bridge2.0-0 \
+    libatk1.0-0 libatspi2.0-0 libcups2 libdbus-1-3 \
+    libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
+    libwayland-client0 libxcomposite1 libxdamage1 \
+    libxfixes3 libxkbcommon0 libxrandr2 xdg-utils \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Chrome stable (minimal install)
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable --no-install-recommends \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Get Chrome version and install matching ChromeDriver
-RUN google-chrome --version | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" > /tmp/chrome_version.txt \
-    && CHROME_VERSION=$(cat /tmp/chrome_version.txt) \
-    && CHROME_MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1) \
-    && echo "Chrome version: $CHROME_VERSION (Major: $CHROME_MAJOR_VERSION)" \
-    && mkdir -p /tmp/chromedriver \
-    && cd /tmp/chromedriver \
-    && wget -q -O chromedriver.zip "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chromedriver-linux64.zip" \
-    && unzip chromedriver.zip \
-    && mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
-    && ln -sf /usr/local/bin/chromedriver /usr/bin/chromedriver \
+RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | awk -F. '{print $1}') \
+    && wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}" -O LATEST_RELEASE \
+    && CHROMEDRIVER_VERSION=$(cat LATEST_RELEASE) \
+    && wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" \
+    && unzip chromedriver_linux64.zip \
+    && mv chromedriver /usr/local/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
-    && chmod +x /usr/bin/chromedriver \
-    && cd / \
-    && rm -rf /tmp/chromedriver \
-    && echo "ChromeDriver installed at: $(which chromedriver)" \
-    && chromedriver --version
+    && rm chromedriver_linux64.zip LATEST_RELEASE
 
-# Set up working directory
+# Create app directory 
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Copy requirements file
 COPY requirements.txt .
-RUN pip install -r requirements.txt
 
-# Copy the app code
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p data screenshots
+# Add download directory with proper permissions
+RUN mkdir -p /tmp/downloads && chmod 777 /tmp/downloads
 
-# Set environment variables
-ENV USE_HEADLESS=true
-ENV PYTHONUNBUFFERED=true
+# Add shm-size environment (this helps with Chrome stability)
+ENV SHM_SIZE=2g
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --single-process --disable-extensions"
+ENV PYTHONUNBUFFERED=1
 
-# Ultra basic Chrome options for maximum stability
-ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage"
-
-# Add memory settings
-ENV NODE_OPTIONS="--max-old-space-size=8192"
-ENV PYTHONIOENCODING=UTF-8
-
-# Set shared memory size (crucial for Chrome stability)
-RUN echo "tmpfs /dev/shm tmpfs defaults,size=2g 0 0" >> /etc/fstab
-
-# Add needed environment variables
-ENV PORT=8080
-ENV PATH="/usr/local/bin:/usr/bin:${PATH}"
-
-# Expose the port for the web service
-EXPOSE 8080
-
-# Run the web service
-CMD ["python", "src/web_service.py"] 
+# Run the script
+CMD ["python", "src/simple_export.py"] 

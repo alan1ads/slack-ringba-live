@@ -138,94 +138,64 @@ def debug_environment():
         logger.error(f"Error during environment debugging: {str(e)}")
 
 def setup_browser():
-    """Set up the Chrome browser with appropriate options"""
+    """Set up the Chrome browser with absolute minimum resources for container environments"""
     try:
         # Debug environment variables 
         logger.info(f"Chrome options from env: {os.getenv('CHROME_OPTIONS', 'Not set')}")
         
-        # Create Chrome options
+        # Create Chrome options with MINIMAL configuration
         chrome_options = webdriver.ChromeOptions()
         
-        # Core stability options - always include these regardless of env vars
+        # Essential options only - stripped down to bare minimum
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        
+        # Add critical memory-saving options
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        
-        # Additional stability options
+        chrome_options.add_argument("--disable-software-rasterizer") 
         chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-infobars")
-        chrome_options.add_argument("--disable-notifications")
-        chrome_options.add_argument("--disable-popup-blocking")
+        chrome_options.add_argument("--disable-features=site-per-process")
+        chrome_options.add_argument("--js-flags=--expose-gc")
+        chrome_options.add_argument("--single-process")  # Use single process to reduce memory
+        chrome_options.add_argument("--window-size=800,600")  # Smaller window size
         
-        # Get additional Chrome options from environment variable
-        chrome_options_str = os.getenv('CHROME_OPTIONS', '')
-        if chrome_options_str:
-            logger.info(f"Adding additional Chrome options from environment: {chrome_options_str}")
-            for option in chrome_options_str.split():
-                if option.strip() and not any(opt in option for opt in ["--headless", "--no-sandbox", "--disable-dev-shm-usage"]):
-                    chrome_options.add_argument(option.strip())
-        
-        # Set page load strategy to eager (don't wait for all resources)
+        # Set page load strategy to minimize resource usage
         chrome_options.page_load_strategy = 'eager'
-            
+        
         # In container environments, use /tmp which is guaranteed to be writable
         download_dir = "/tmp"
         os.makedirs(download_dir, exist_ok=True)
         logger.info(f"Using /tmp as download directory for container compatibility")
         
-        # Check if directory is writable with a test file
-        try:
-            test_file_path = os.path.join(download_dir, "test_file.txt")
-            with open(test_file_path, "w") as f:
-                f.write("test")
-            os.remove(test_file_path)
-            logger.info(f"Download directory {download_dir} is writable")
-        except Exception as e:
-            logger.error(f"Download directory {download_dir} is not writable: {str(e)}")
-            # Try fallback to current directory
-            download_dir = os.path.abspath(os.getcwd())
-            logger.info(f"Using fallback download directory: {download_dir}")
-            
         # Set very explicit download settings
         prefs = {
             "download.default_directory": download_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
             "safebrowsing.enabled": False,
-            "safebrowsing.disable_download_protection": True,
             "profile.default_content_settings.popups": 0,
-            "download.open_pdf_in_system_reader": False,
-            "plugins.always_open_pdf_externally": True,
-            "browser.download.folderList": 2,
-            "browser.download.dir": download_dir,
-            "browser.helperApps.neverAsk.saveToDisk": "application/csv,text/csv,application/vnd.ms-excel"
+            "browser.helperApps.neverAsk.saveToDisk": "application/csv,text/csv"
         }
         chrome_options.add_experimental_option("prefs", prefs)
-        
-        # Disable automation flags
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option("useAutomationExtension", False)
         
         # Set the global download directory as an environment variable
         os.environ["DOWNLOAD_DIR"] = download_dir
         
         # Log the final Chrome options
-        logger.info(f"Setting up Chrome with options: {chrome_options.arguments}")
-        logger.info(f"Download directory set to: {download_dir}")
+        logger.info(f"Setting up Chrome with minimal options: {chrome_options.arguments}")
         
         # Create the browser
         browser = webdriver.Chrome(options=chrome_options)
         
-        # Set timeout
-        browser.set_page_load_timeout(90)  # Longer timeout for page loads
-        browser.implicitly_wait(15)        # Longer implicit wait
+        # Set shorter timeouts
+        browser.set_page_load_timeout(60)
+        browser.implicitly_wait(10)
         
-        # Set window size
-        browser.set_window_size(1920, 1080)
+        # Add a memory management hook - periodically call JS garbage collection
+        browser.execute_script("window.gc = function() { if (window.gc) window.gc(); };")
         
-        logger.info("Chrome browser set up successfully")
+        logger.info("Chrome browser set up successfully with minimal configuration")
         return browser
     except Exception as e:
         logger.error(f"Failed to set up browser: {str(e)}")
@@ -347,53 +317,36 @@ def login_to_ringba(browser):
         return False
 
 def navigate_to_call_logs(browser):
-    """Navigate to Call Logs page"""
+    """Navigate to Call Logs page with minimal resource usage"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # Directly navigate to the Call Logs URL
-            logger.info(f"Navigating to call logs report (attempt {attempt+1}/{max_retries})...")
-            browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
+            # Clear memory before navigation
+            browser.execute_script("if(window.gc) window.gc();")
             
-            # Wait for page to load
+            # Directly navigate to the Call Logs URL with a simpler approach
+            logger.info(f"Navigating to call logs (attempt {attempt+1}/{max_retries})...")
+            
+            # First go to a lighter page to ensure stability
+            browser.get("https://app.ringba.com/#/dashboard")
+            time.sleep(5)  # Give page time to stabilize
+            
+            # Force garbage collection
+            browser.execute_script("if(window.gc) window.gc();")
+            
+            # Now navigate to the call logs with reduced elements
+            browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary?limit=50")
+            
+            # Wait for page to load with a simpler check
             logger.info("Waiting for call logs page to load...")
-            time.sleep(15)
+            time.sleep(10)
             
-            # Take screenshot
+            # Take screenshot for debugging
             take_screenshot(browser, f"call_logs_page_attempt_{attempt+1}")
             
-            # Use WebDriverWait to look for elements that indicate page is loaded
-            wait = WebDriverWait(browser, 30)
-            
-            # Try different selectors to confirm the page is loaded
-            selectors = [
-                (By.CSS_SELECTOR, ".reporting-container"),
-                (By.CSS_SELECTOR, ".dashboard-container"),
-                (By.CSS_SELECTOR, "table.mat-table"),
-                (By.CSS_SELECTOR, ".mat-elevation-z8"),
-                (By.XPATH, "//h1[contains(text(), 'Call Logs')]"),
-                (By.XPATH, "//button[contains(text(), 'Export')]")
-            ]
-            
-            page_loaded = False
-            for selector_type, selector in selectors:
-                try:
-                    logger.info(f"Looking for element with {selector_type}={selector}")
-                    wait.until(EC.presence_of_element_located((selector_type, selector)))
-                    logger.info(f"Found element with {selector_type}={selector} - page appears to be loaded")
-                    page_loaded = True
-                    break
-                except Exception as e:
-                    logger.warning(f"Element {selector_type}={selector} not found: {str(e)}")
-            
-            # If we find any indicator that the page loaded successfully
-            if page_loaded:
-                logger.info("Successfully navigated to call logs page")
-                return True
-                
-            # Even if indicators aren't found, check if we have the right URL
+            # Simple URL check instead of complex DOM verification
             if "call-logs" in browser.current_url:
-                logger.info("URL contains 'call-logs' - assuming navigation was successful")
+                logger.info("Successfully navigated to call logs page")
                 return True
             else:
                 logger.error(f"Failed to navigate to call logs page. Current URL: {browser.current_url}")

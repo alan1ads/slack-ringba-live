@@ -1,73 +1,60 @@
-# Ringba RPC Monitor with Slack Integration
+# Ringba CSV Export Service
 
-This system monitors Ringba targets based on their Revenue Per Call (RPC) metrics and sends alerts to Slack. It uses Ringba's direct API endpoints to get real-time data including tag information.
+This service automates the process of logging into Ringba, exporting CSV files from the Call Logs reporting section, and sending alerts to Slack when targets have an RPC below a specified threshold.
 
-## Features
+## Deployment Instructions for Render.com
 
-- **Morning Check (10 AM EST)**: Identifies all enabled targets with RPC above $10
-- **Afternoon Check (3 PM EST)**: Checks if any morning targets fell below the $10 RPC threshold
-- **Tag Information**: Displays top tags associated with targets in Slack notifications
-- **Real-time Data**: Gets current data during each check
-- **Slack Integration**: Sends formatted alerts with detailed metrics and tag information
+### Important: Use Background Worker Instead of Web Service
 
-## Configuration
+The Chrome browser automation requires more resources than are typically available in a Web Service environment. For better reliability, deploy this as a **Background Worker** in Render.com.
 
-Create a `.env` file with the following variables:
+### Steps to Deploy:
 
-```
-RINGBA_API_TOKEN=your_api_token
-RINGBA_ACCOUNT_ID=your_account_id
-SLACK_WEBHOOK_URL=your_slack_webhook_url
-RPC_THRESHOLD=10.0
-RINGBA_AUTH_FORMAT=Token
-MORNING_CHECK_TIME=10:00
-AFTERNOON_CHECK_TIME=15:00
-```
+1. In your Render.com dashboard, click **New** and select **Background Worker**
 
-## Running the Monitor
+2. Connect your GitHub repository
 
-### As a Scheduler
+3. Configure the following settings:
+   - **Name**: ringba-export-service
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python src/simple_export.py`
 
-To run the monitor as a scheduler that performs checks at 10 AM and 3 PM:
+4. Add the following environment variables:
+   - `RINGBA_USERNAME`: Your Ringba username
+   - `RINGBA_PASSWORD`: Your Ringba password
+   - `SLACK_WEBHOOK_URL`: Your Slack webhook URL
+   - `RPC_THRESHOLD`: The RPC threshold for alerts (default: 12.0)
+   - `MORNING_CHECK_TIME`: When to run the morning check (default: 11:00)
+   - `MIDDAY_CHECK_TIME`: When to run the midday check (default: 14:00)
+   - `AFTERNOON_CHECK_TIME`: When to run the afternoon check (default: 16:30)
+   - `SHM_SIZE`: Shared memory size (set to: 2g)
+   - `CHROME_OPTIONS`: Chrome configuration (set to: --headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --single-process)
+   
+5. Set the instance type to at least 512 MB RAM
 
-```
-python src/direct_rpc_monitor.py
-```
+6. For scheduling, use Render.com's cron job scheduling feature by adding the following cron expressions:
+   ```
+   0 11 * * 1-5   # Run at 11:00 AM ET Monday-Friday
+   0 14 * * 1-5   # Run at 2:00 PM ET Monday-Friday
+   30 16 * * 1-5  # Run at 4:30 PM ET Monday-Friday
+   ```
 
-### Manual Checks
+### Troubleshooting
 
-To manually run the morning check:
+- If Chrome continues to crash, try increasing the memory allocation (1GB or higher)
+- Check logs for error messages related to browser automation
+- Ensure your Ringba credentials are correct and have access to the Call Logs section
 
-```
-python src/direct_rpc_monitor.py morning
-```
+## Local Development
 
-To manually run the afternoon check:
+To run the service locally:
 
-```
-python src/direct_rpc_monitor.py afternoon
-```
+1. Install dependencies: `pip install -r requirements.txt`
+2. Create a `.env` file with the required environment variables
+3. Run with: `python src/simple_export.py`
 
-To run both checks for testing:
+## Notes
 
-```
-python src/direct_rpc_monitor.py test
-```
-
-## Files
-
-- `src/ringba_direct_api.py`: API client that communicates with Ringba
-- `src/direct_rpc_monitor.py`: Main script for RPC monitoring and Slack notifications
-- `src/test_direct_api.py`: Test script for the API client
-- `src/test_direct_api_with_tags.py`: Test script for API client with tag information
-
-## Slack Notifications
-
-The system sends Slack notifications with the following information:
-
-- Target name
-- Current RPC value
-- Call count
-- Revenue
-- Top 3 tags associated with the target (if available)
-- Link to view the target in Ringba 
+- The service is designed to handle unstable container environments
+- It includes multiple fallback methods for downloading CSV files
+- Screenshots are saved for debugging purposes 
