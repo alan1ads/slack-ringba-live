@@ -13,6 +13,15 @@ import logging
 from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
+# Import Chrome setup module to ensure Chrome is installed
+try:
+    from src import setup_chrome
+except ImportError:
+    try:
+        import setup_chrome
+    except ImportError:
+        print("Warning: Could not import setup_chrome module")
+
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
