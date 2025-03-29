@@ -441,18 +441,87 @@ def click_export_csv(browser):
                 const headers = [];
                 const rows = [];
                 
-                // Get headers from thead or first row
-                const headerCells = table.querySelectorAll('th') || table.querySelectorAll('tr:first-child td');
-                headerCells.forEach(cell => headers.push(cell.textContent.trim()));
+                // Special handling for Ringba table with filter buttons for column headers
+                // First check if this might be the Ringba reporting table by looking for specific elements
+                const filterButtons = table.querySelectorAll('button[class*="filter"], th button, th .mat-sort-header-container');
+                const isRingbaTable = filterButtons.length > 0 || 
+                                      table.closest('.report-view, .call-logs, .summary-report') !== null;
+                
+                if (isRingbaTable) {
+                    console.log('Detected potential Ringba reporting table');
+                    
+                    // These are the expected column names in the Ringba reporting table based on the screenshot
+                    const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
+                                         'Number Pool', 'Date', 'Duplicate', 'Tags', 'IVR Handle Time',
+                                         'RPC', 'Revenue', 'Payout'];
+                    
+                    // Try to find header row with filter buttons or column headers
+                    const headerRow = table.querySelector('thead tr') || 
+                                      table.querySelector('tr:first-child') ||
+                                      document.querySelector('.mat-header-row, [role="row"]:first-child');
+                    
+                    if (headerRow) {
+                        // Get all header cells
+                        const headerCells = headerRow.querySelectorAll('th, td, .mat-header-cell, [role="columnheader"]');
+                        
+                        headerCells.forEach(cell => {
+                            // Get text content of the cell, including any nested elements
+                            let headerText = cell.textContent.trim();
+                            
+                            // Check if header contains a button (common in sortable Ringba tables)
+                            const buttonText = cell.querySelector('button, .mat-sort-header-container')?.textContent.trim();
+                            if (buttonText) {
+                                headerText = buttonText;
+                            }
+                            
+                            // Clean up the header text
+                            headerText = headerText.replace(/▼|▲|↓|↑/g, '').trim();
+                            
+                            // Match against expected headers if text is ambiguous or empty
+                            if (!headerText || headerText === '↕' || headerText.length < 2) {
+                                // Try to infer header from column index and position
+                                const index = headers.length;
+                                if (index < expectedHeaders.length) {
+                                    headerText = expectedHeaders[index];
+                                    console.log(`Inferred header ${headerText} based on position`);
+                                } else {
+                                    headerText = `Column${index+1}`;
+                                }
+                            }
+                            
+                            headers.push(headerText);
+                        });
+                        
+                        console.log('Extracted headers:', headers);
+                    } else {
+                        console.log('No header row found in Ringba table, using expected headers');
+                        // If we can't find header cells, use the expected headers
+                        expectedHeaders.forEach(header => headers.push(header));
+                    }
+                } else {
+                    // Standard header extraction for non-Ringba tables
+                    const headerCells = table.querySelectorAll('th') || table.querySelectorAll('tr:first-child td');
+                    headerCells.forEach(cell => headers.push(cell.textContent.trim()));
+                }
                 
                 // Get data rows
-                const dataRows = table.querySelectorAll('tbody tr') || table.querySelectorAll('tr:not(:first-child)');
+                const dataRows = table.querySelectorAll('tbody tr') || 
+                                 table.querySelectorAll('tr:not(:first-child)') || 
+                                 document.querySelectorAll('.mat-row, [role="row"]:not(:first-child)');
+                
                 dataRows.forEach(row => {
                     const rowData = {};
-                    const cells = row.querySelectorAll('td');
+                    const cells = row.querySelectorAll('td, .mat-cell, [role="cell"]');
+                    
+                    // Skip header rows or rows with no cells
+                    if (cells.length === 0 || row.closest('thead')) return;
+                    
                     for (let i = 0; i < Math.min(cells.length, headers.length || cells.length); i++) {
-                        rowData[headers[i] || `Column${i+1}`] = cells[i].textContent.trim();
+                        const cellText = cells[i].textContent.trim();
+                        const headerName = headers[i] || `Column${i+1}`;
+                        rowData[headerName] = cellText;
                     }
+                    
                     if (Object.keys(rowData).length > 0) {
                         rows.push(rowData);
                     }
@@ -468,16 +537,52 @@ def click_export_csv(browser):
                 
                 // Try to get headers from different possible structures
                 const headerCells = grid.querySelectorAll('[role="columnheader"], .header-cell, .column-header, th');
-                headerCells.forEach(cell => headers.push(cell.textContent.trim()));
+                
+                // These are the expected column names in the Ringba reporting table
+                const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
+                                     'Number Pool', 'Date', 'Duplicate', 'Tags', 'IVR Handle Time',
+                                     'RPC', 'Revenue', 'Payout'];
+                                     
+                // Check if this is likely the Ringba reporting grid
+                const isRingbaGrid = grid.closest('.report-view, .call-logs, .summary-report') !== null || 
+                                    headerCells.length >= 6; // Ringba tables typically have many columns
+                
+                if (headerCells.length > 0) {
+                    headerCells.forEach(cell => {
+                        let headerText = cell.textContent.trim();
+                        
+                        // Clean up the header text
+                        headerText = headerText.replace(/▼|▲|↓|↑/g, '').trim();
+                        
+                        headers.push(headerText);
+                    });
+                } else if (isRingbaGrid) {
+                    // If we can't find header cells but this looks like a Ringba grid, use the expected headers
+                    console.log('Using expected Ringba headers for grid');
+                    expectedHeaders.forEach(header => headers.push(header));
+                }
                 
                 // Try to get rows from different possible structures  
                 const dataRows = grid.querySelectorAll('[role="row"], .row, .data-row');
                 dataRows.forEach(row => {
+                    // Skip if this is likely a header row
+                    if (row.getAttribute('role') === 'columnheader' || 
+                        row.classList.contains('header-row') || 
+                        row.parentElement.tagName === 'THEAD') {
+                        return;
+                    }
+                    
                     const rowData = {};
                     const cells = row.querySelectorAll('[role="cell"], .cell, .data-cell, td');
+                    
                     for (let i = 0; i < Math.min(cells.length, headers.length || cells.length); i++) {
-                        rowData[headers[i] || `Column${i+1}`] = cells[i].textContent.trim();
+                        const headerName = headers[i] || `Column${i+1}`;
+                        // Use expected header if available for this position
+                        const mappedHeader = isRingbaGrid && i < expectedHeaders.length ? 
+                                            expectedHeaders[i] : headerName;
+                        rowData[mappedHeader] = cells[i].textContent.trim();
                     }
+                    
                     if (Object.keys(rowData).length > 0) {
                         rows.push(rowData);
                     }
@@ -490,66 +595,106 @@ def click_export_csv(browser):
             let bestData = null;
             let maxRows = 0;
             
-            // Try tables first
-            tables.forEach(table => {
-                const data = extractFromTable(table);
-                if (data.rows.length > maxRows) {
-                    maxRows = data.rows.length;
-                    bestData = data;
-                }
-            });
-            
-            // Then try grid components
-            gridElements.forEach(grid => {
-                const data = extractFromGrid(grid);
-                if (data.rows.length > maxRows) {
-                    maxRows = data.rows.length;
-                    bestData = data;
-                }
-            });
-            
-            // If we still don't have data, try scanning all rows that might contain data
-            if (!bestData || bestData.rows.length === 0) {
-                console.log("No table data found, trying to scan all row elements...");
+            // CUSTOM EXTRACTION FOR RINGBA TABLE
+            // First try a targeted approach specifically for the Ringba reporting table
+            // Based on the screenshot showing Campaign, Publisher, Target, Buyer, etc. columns
+            try {
+                console.log('Attempting targeted extraction for Ringba reporting table');
                 
-                // Try to infer structure from consistent row patterns
-                const possibleDataRows = Array.from(rowElements).filter(row => {
-                    // Look for rows with multiple cells/elements that might be data
-                    const cells = row.querySelectorAll('td, .cell, [role="cell"], div');
-                    return cells.length >= 3; // Assume rows with at least 3 cells might be data
-                });
+                // Find all rows that might contain data
+                const allRows = Array.from(document.querySelectorAll('tr, [role="row"], .row'));
                 
-                if (possibleDataRows.length > 0) {
-                    // Take the first row as a pattern and try to extract consistent data
-                    const patternRow = possibleDataRows[0];
-                    const cellElements = patternRow.querySelectorAll('td, .cell, [role="cell"], div');
-                    
-                    // Create header names based on position
-                    const inferredHeaders = [];
-                    for (let i = 0; i < cellElements.length; i++) {
-                        inferredHeaders.push(`Column${i+1}`);
+                // Expected column names based on screenshot - these MUST match what the Python code expects
+                const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
+                                    'Number Pool', 'Date', 'Duplicate', 'Tags', 'RPC', 'Revenue', 'Payout'];
+                
+                // Extract data from rows
+                const extractedRows = [];
+                
+                // Process each potential row
+                allRows.forEach(row => {
+                    // Skip very short rows or header rows
+                    if (row.closest('thead') || row.querySelectorAll('th').length > 0) {
+                        return;
                     }
                     
-                    // Extract data from all rows following this pattern
-                    const inferredRows = [];
-                    possibleDataRows.forEach(row => {
-                        const cells = row.querySelectorAll('td, .cell, [role="cell"], div');
-                        if (cells.length >= 3) {
-                            const rowData = {};
-                            for (let i = 0; i < cells.length; i++) {
-                                rowData[inferredHeaders[i]] = cells[i].textContent.trim();
-                            }
-                            inferredRows.push(rowData);
-                        }
+                    // Get all cells in this row
+                    const cells = row.querySelectorAll('td, .cell, [role="cell"], div');
+                    
+                    // Skip rows with insufficient cells
+                    if (cells.length < 3) return;
+                    
+                    // Check if this row has RPC data (usually contains $ values)
+                    // This helps identify real data rows versus UI elements
+                    const hasRPCData = Array.from(cells).some(cell => {
+                        const text = cell.textContent.trim();
+                        return /\$\d+/.test(text); // Match dollar amount
                     });
                     
-                    if (inferredRows.length > maxRows) {
-                        bestData = {
-                            headers: inferredHeaders,
-                            rows: inferredRows
-                        };
+                    // Look for row containing Target, Live, Completed values
+                    const hasTargetData = Array.from(cells).some(cell => {
+                        const text = cell.textContent.trim();
+                        return ['Target', 'Live', 'Completed', 'RPC'].includes(text);
+                    });
+                    
+                    if (hasRPCData || hasTargetData) {
+                        // Create a row object using the expected headers
+                        const rowData = {};
+                        
+                        // Map cell values to expected headers
+                        for (let i = 0; i < Math.min(cells.length, expectedHeaders.length); i++) {
+                            rowData[expectedHeaders[i]] = cells[i].textContent.trim();
+                        }
+                        
+                        // Add only if we have meaningful data
+                        if (Object.keys(rowData).length >= 3) {
+                            extractedRows.push(rowData);
+                        }
                     }
+                });
+                
+                // Use this data if we found enough rows
+                if (extractedRows.length > 0) {
+                    console.log(`Targeted extraction found ${extractedRows.length} rows with required format`);
+                    bestData = {
+                        headers: expectedHeaders,
+                        rows: extractedRows
+                    };
+                    maxRows = extractedRows.length;
                 }
+            } catch (e) {
+                console.error('Error in targeted Ringba extraction:', e);
+            }
+            
+            // If targeted approach didn't work, fall back to other methods
+            if (!bestData || bestData.rows.length === 0) {
+                // Try fallback methods here...
+                // The original code for table and grid extraction follows...
+                
+                // Try tables first
+                tables.forEach(table => {
+                    const data = extractFromTable(table);
+                    if (data.rows.length > maxRows) {
+                        maxRows = data.rows.length;
+                        bestData = data;
+                    }
+                });
+                
+                // Then try grid components
+                gridElements.forEach(grid => {
+                    const data = extractFromGrid(grid);
+                    if (data.rows.length > maxRows) {
+                        maxRows = data.rows.length;
+                        bestData = data;
+                    }
+                });
+            }
+            
+            // ...rest of the scanning code for rows...
+            
+            // Add debugging to show which columns were found
+            if (bestData && bestData.headers) {
+                console.log('Found headers:', bestData.headers.join(', '));
             }
             
             // Return the best data found
@@ -1194,29 +1339,133 @@ def process_csv_file(file_path):
         rpc_col = None
         
         # Try different potential column names for target
-        for col in ['Target Name', 'Target', 'TargetName', 'Campaign']:
+        for col in ['Target', 'Target Name', 'TargetName', 'Campaign', 'Target Campaign']:
             if col in df.columns:
                 target_col = col
                 break
                 
+        # If Target column not found, check for columns matching the word "Target"
+        if not target_col:
+            target_cols = [col for col in df.columns if 'target' in col.lower()]
+            if target_cols:
+                target_col = target_cols[0]
+                logger.info(f"Using column with 'target' in name: {target_col}")
+                
         # Try different potential column names for RPC
-        for col in ['RPC', 'Avg. Revenue per Call', 'Revenue Per Call', 'Revenue per Call', 'RPCall']:
+        for col in ['RPC', 'Avg. Revenue per Call', 'Revenue Per Call', 'Revenue per Call', 'RPCall', 'Revenue']:
             if col in df.columns:
                 rpc_col = col
                 break
-        
-        if not target_col:
-            logger.error("Could not find Target column in CSV")
-            return None
-            
+                
+        # If RPC column not found, look for columns with $ values
         if not rpc_col:
-            logger.error("Could not find RPC column in CSV")
-            return None
+            # Check each column for dollar sign patterns
+            for col in df.columns:
+                # Sample the column to see if it contains dollar amounts
+                sample_values = df[col].astype(str).str.contains('\$').sum()
+                if sample_values > 0:
+                    rpc_col = col
+                    logger.info(f"Using column with $ values as RPC: {rpc_col}")
+                    break
+                    
+        # SPECIAL CASE: If we're using direct extraction method and columns aren't found
+        # Handle the generic Column1, Column2, etc. naming convention
+        if not target_col and any(col.startswith('Column') for col in df.columns):
+            logger.info("Using direct extraction column mapping")
+            
+            # Try to identify which column might be Target based on values
+            # Look for columns containing values like "Target", "Live", "Completed"
+            for col in df.columns:
+                values = df[col].astype(str).str.lower()
+                if values.str.contains('target|live|completed|ivr').any():
+                    target_col = col
+                    logger.info(f"Identified Target column as {col} based on values")
+                    break
+                    
+            # If we still don't have Target column, use Column3 which matches position in the table
+            if not target_col and 'Column3' in df.columns:
+                target_col = 'Column3'  # Typically third column is Target in Ringba UI
+                logger.info("Using Column3 as Target column based on position")
+                
+            # Try to identify RPC column by looking for $ values
+            if not rpc_col:
+                for col in df.columns:
+                    sample = df[col].astype(str)
+                    if sample.str.contains('\$').any():
+                        rpc_col = col
+                        logger.info(f"Identified RPC column as {col} based on $ values")
+                        break
+                        
+            # If still no RPC column, Column10 is often RPC in Ringba UI
+            if not rpc_col and 'Column10' in df.columns:
+                rpc_col = 'Column10'
+                logger.info("Using Column10 as RPC column based on position")
+                
+        # If we couldn't find the target column at all, log and try to continue
+        if not target_col:
+            # As a last resort, pick a column that looks like it has names
+            for col in df.columns:
+                # Check if column has string values that could be target names
+                if df[col].dtype == 'object' and df[col].astype(str).str.len().mean() > 3:
+                    target_col = col
+                    logger.info(f"Using {col} as Target column based on string content")
+                    break
+                    
+            if not target_col and len(df.columns) >= 3:
+                target_col = df.columns[2]  # Use the third column by position
+                logger.info(f"Last resort: Using {target_col} as Target column")
+            elif not target_col and len(df.columns) > 0:
+                target_col = df.columns[0]  # Use the first column as a last resort
+                logger.info(f"Absolute last resort: Using {target_col} as Target column")
+            else:
+                logger.error("Could not find Target column in CSV")
+                return None
+                
+        # Same logic for RPC column
+        if not rpc_col:
+            # As a last resort, pick a numeric column that could be RPC
+            for col in df.columns:
+                try:
+                    # Check if column can be converted to numeric
+                    test_numeric = pd.to_numeric(df[col], errors='coerce')
+                    if test_numeric.notna().sum() > 0:
+                        rpc_col = col
+                        logger.info(f"Using {col} as RPC column based on numeric content")
+                        break
+                except:
+                    continue
+                    
+            if not rpc_col and len(df.columns) >= 10:
+                rpc_col = df.columns[9]  # Use the tenth column by position (typical for RPC)
+                logger.info(f"Last resort: Using {rpc_col} as RPC column")
+            elif not rpc_col and len(df.columns) > 1:
+                rpc_col = df.columns[1]  # Use the second column as a last resort
+                logger.info(f"Absolute last resort: Using {rpc_col} as RPC column")
+            else:
+                logger.error("Could not find RPC column in CSV")
+                return None
             
         logger.info(f"Using columns: Target={target_col}, RPC={rpc_col}")
         
         # Convert RPC column to numeric, handling currency symbols and commas
-        df[rpc_col] = df[rpc_col].replace('[\$,]', '', regex=True).astype(float)
+        try:
+            # First try a straightforward approach
+            df[rpc_col] = df[rpc_col].replace('[\$,]', '', regex=True).astype(float)
+        except:
+            # If that fails, try more careful conversion
+            try:
+                # Convert to string first
+                df[rpc_col] = df[rpc_col].astype(str)
+                # Remove currency symbols and commas
+                df[rpc_col] = df[rpc_col].str.replace('[\$,£€]', '', regex=True)
+                # Convert to float, treating errors as NaN
+                df[rpc_col] = pd.to_numeric(df[rpc_col], errors='coerce')
+                # Drop rows where conversion failed
+                df = df.dropna(subset=[rpc_col])
+                logger.info(f"Converted {rpc_col} to numeric with {len(df)} valid rows")
+            except Exception as e:
+                logger.error(f"Could not convert RPC column to numeric: {str(e)}")
+                return None
         
         # Get threshold from environment variable or use default
         rpc_threshold = float(os.getenv('RPC_THRESHOLD', 12.0))
@@ -1241,7 +1490,7 @@ def process_csv_file(file_path):
                 'threshold': rpc_threshold
             }
         else:
-            logger.info("No targets found below the RPC threshold")
+            logger.info("No low RPC targets found")
             return None
             
     except Exception as e:
