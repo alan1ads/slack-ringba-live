@@ -595,72 +595,175 @@ def click_export_csv(browser):
             let bestData = null;
             let maxRows = 0;
             
-            // CUSTOM EXTRACTION FOR RINGBA TABLE
-            // First try a targeted approach specifically for the Ringba reporting table
-            // Based on the screenshot showing Campaign, Publisher, Target, Buyer, etc. columns
+            // CUSTOM EXTRACTION FOR RINGBA TABLE - UPDATED FOR SPECIFIC RINGBA SUMMARY TABLE LAYOUT
+            // First try a targeted approach specifically for the Ringba reporting table with focus on data rows
             try {
-                console.log('Attempting targeted extraction for Ringba reporting table');
+                console.log('Attempting targeted extraction for Ringba summary table');
                 
-                // Find all rows that might contain data
-                const allRows = Array.from(document.querySelectorAll('tr, [role="row"], .row'));
+                // Look specifically for the Summary table section
+                const summarySection = document.querySelector('.summary') || 
+                                      document.querySelector('.summary-container') || 
+                                      document.querySelector('.summary-section');
                 
                 // Expected column names based on screenshot - these MUST match what the Python code expects
                 const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
                                     'Number Pool', 'Date', 'Duplicate', 'Tags', 'RPC', 'Revenue', 'Payout'];
                 
-                // Extract data from rows
-                const extractedRows = [];
+                // Find the main table
+                const mainTable = summarySection ? 
+                                  summarySection.querySelector('table') : 
+                                  document.querySelector('table');
                 
-                // Process each potential row
-                allRows.forEach(row => {
-                    // Skip very short rows or header rows
-                    if (row.closest('thead') || row.querySelectorAll('th').length > 0) {
-                        return;
+                if (mainTable) {
+                    console.log('Found main summary table');
+                    
+                    // Get all rows including headers, data rows, and totals
+                    const allRows = mainTable.querySelectorAll('tr, [role="row"]');
+                    console.log(`Found ${allRows.length} total rows in the table`);
+                    
+                    // Skip the first row (header) and last row (totals)
+                    // This ensures we get the data rows in between
+                    const dataRows = Array.from(allRows).slice(1, -1);
+                    console.log(`Targeting ${dataRows.length} data rows (excluding header and totals)`);
+                    
+                    // If no data rows found using slice, try all non-header rows
+                    let processedRows = dataRows;
+                    if (dataRows.length === 0) {
+                        // Try identifying data rows by their structure
+                        processedRows = Array.from(allRows).filter(row => {
+                            // Skip rows with th elements (headers)
+                            if (row.querySelector('th')) return false;
+                            
+                            // Skip rows with "Totals" text
+                            if (row.textContent.includes('Totals')) return false;
+                            
+                            // Skip very short rows
+                            const cells = row.querySelectorAll('td, [role="cell"]');
+                            if (cells.length < 3) return false;
+                            
+                            return true;
+                        });
+                        console.log(`Found ${processedRows.length} data rows using structure filter`);
                     }
                     
-                    // Get all cells in this row
-                    const cells = row.querySelectorAll('td, .cell, [role="cell"], div');
+                    // Extract headers from the first row
+                    const headerRow = allRows[0];
+                    const headerCells = headerRow.querySelectorAll('th, [role="columnheader"]');
                     
-                    // Skip rows with insufficient cells
-                    if (cells.length < 3) return;
-                    
-                    // Check if this row has RPC data (usually contains $ values)
-                    // This helps identify real data rows versus UI elements
-                    const hasRPCData = Array.from(cells).some(cell => {
-                        const text = cell.textContent.trim();
-                        return /\$\d+/.test(text); // Match dollar amount
+                    const extractedHeaders = [];
+                    headerCells.forEach(cell => {
+                        // Get text content of the cell, including any nested elements
+                        let headerText = cell.textContent.trim();
+                        
+                        // Check if header contains a button (common in sortable tables)
+                        const buttonText = cell.querySelector('button, .mat-sort-header-container')?.textContent.trim();
+                        if (buttonText) {
+                            headerText = buttonText;
+                        }
+                        
+                        // Clean up the header text
+                        headerText = headerText.replace(/▼|▲|↓|↑/g, '').trim();
+                        
+                        if (headerText) {
+                            extractedHeaders.push(headerText);
+                        }
                     });
                     
-                    // Look for row containing Target, Live, Completed values
-                    const hasTargetData = Array.from(cells).some(cell => {
-                        const text = cell.textContent.trim();
-                        return ['Target', 'Live', 'Completed', 'RPC'].includes(text);
-                    });
+                    console.log(`Extracted ${extractedHeaders.length} headers:`, extractedHeaders);
                     
-                    if (hasRPCData || hasTargetData) {
-                        // Create a row object using the expected headers
+                    // If headers were successfully extracted, use them
+                    const headers = extractedHeaders.length >= 3 ? extractedHeaders : expectedHeaders;
+                    
+                    // Extract data from rows
+                    const extractedRows = [];
+                    
+                    // Process each row to extract cell values
+                    processedRows.forEach(row => {
+                        const cells = row.querySelectorAll('td, [role="cell"]');
+                        if (cells.length === 0) return;
+                        
+                        // Create row object with proper column mapping
                         const rowData = {};
                         
-                        // Map cell values to expected headers
-                        for (let i = 0; i < Math.min(cells.length, expectedHeaders.length); i++) {
-                            rowData[expectedHeaders[i]] = cells[i].textContent.trim();
+                        // Map cells to headers
+                        for (let i = 0; i < Math.min(cells.length, headers.length); i++) {
+                            let cellValue = cells[i].textContent.trim();
+                            // Clean up cell value if needed (remove extra spaces, special chars)
+                            rowData[headers[i]] = cellValue;
                         }
                         
-                        // Add only if we have meaningful data
-                        if (Object.keys(rowData).length >= 3) {
+                        // Make sure we have some data
+                        if (Object.keys(rowData).length > 0) {
                             extractedRows.push(rowData);
                         }
+                    });
+                    
+                    // Direct scan for RPC values in case the table structure is unusual
+                    if (extractedRows.length === 0) {
+                        console.log('No rows extracted from table structure, scanning for RPC values');
+                        
+                        // Find all elements containing dollar amounts (potential RPC values)
+                        const rpcElements = Array.from(document.querySelectorAll('*'))
+                            .filter(el => {
+                                // Only consider leaf nodes (no children)
+                                if (el.children.length > 0) return false;
+                                
+                                // Look for dollar amounts
+                                const text = el.textContent.trim();
+                                return /\$\d+\.\d+/.test(text);
+                            });
+                        
+                        console.log(`Found ${rpcElements.length} potential RPC value elements`);
+                        
+                        if (rpcElements.length > 0) {
+                            // For each RPC element, try to find its row
+                            rpcElements.forEach(rpcEl => {
+                                // Find the closest row or row-like container
+                                const rowContainer = rpcEl.closest('tr') || 
+                                                    rpcEl.closest('[role="row"]') || 
+                                                    rpcEl.closest('.row') ||
+                                                    rpcEl.parentElement;
+                                
+                                if (!rowContainer) return;
+                                
+                                // If we've already processed this row, skip
+                                if (rowContainer.__processed) return;
+                                rowContainer.__processed = true;
+                                
+                                // Get all cells in this row (siblings or children of container)
+                                const siblings = Array.from(rowContainer.querySelectorAll('td, [role="cell"], span, div'))
+                                    .filter(el => el.children.length === 0 && el.textContent.trim());
+                                
+                                // Create a row object with our expected headers
+                                const rowData = {};
+                                for (let i = 0; i < Math.min(siblings.length, expectedHeaders.length); i++) {
+                                    rowData[expectedHeaders[i]] = siblings[i].textContent.trim();
+                                }
+                                
+                                // Make sure we set the RPC value
+                                if (!rowData['RPC'] || !rowData['RPC'].includes('$')) {
+                                    rowData['RPC'] = rpcEl.textContent.trim();
+                                }
+                                
+                                // Only add if we have enough data
+                                if (Object.keys(rowData).length >= 3) {
+                                    extractedRows.push(rowData);
+                                }
+                            });
+                        }
                     }
-                });
-                
-                // Use this data if we found enough rows
-                if (extractedRows.length > 0) {
-                    console.log(`Targeted extraction found ${extractedRows.length} rows with required format`);
-                    bestData = {
-                        headers: expectedHeaders,
-                        rows: extractedRows
-                    };
-                    maxRows = extractedRows.length;
+                    
+                    console.log(`Successfully extracted ${extractedRows.length} data rows from table`);
+                    
+                    if (extractedRows.length > 0) {
+                        bestData = {
+                            headers: headers,
+                            rows: extractedRows
+                        };
+                        maxRows = extractedRows.length;
+                    }
+                } else {
+                    console.log('No main table found, trying alternative extraction methods');
                 }
             } catch (e) {
                 console.error('Error in targeted Ringba extraction:', e);
@@ -1331,8 +1434,16 @@ def process_csv_file(file_path):
         # Read the CSV file
         df = pd.read_csv(file_path)
         
-        # Log the columns for debugging
+        # Log the columns and first few rows for debugging
         logger.info(f"CSV columns: {', '.join(df.columns)}")
+        logger.info(f"Found {len(df)} rows in the CSV file")
+        
+        # Show sample of the data
+        if not df.empty:
+            sample_rows = min(2, len(df))
+            sample_df = df.head(sample_rows)
+            for i, row in sample_df.iterrows():
+                logger.info(f"Sample row {i+1}: {dict(row)}")
         
         # Look for relevant columns
         target_col = None
@@ -1447,6 +1558,10 @@ def process_csv_file(file_path):
             
         logger.info(f"Using columns: Target={target_col}, RPC={rpc_col}")
         
+        # Print sample of RPC values to debug
+        if not df.empty:
+            logger.info(f"Sample RPC values: {df[rpc_col].head(3).tolist()}")
+        
         # Convert RPC column to numeric, handling currency symbols and commas
         try:
             # First try a straightforward approach
@@ -1460,6 +1575,10 @@ def process_csv_file(file_path):
                 df[rpc_col] = df[rpc_col].str.replace('[\$,£€]', '', regex=True)
                 # Convert to float, treating errors as NaN
                 df[rpc_col] = pd.to_numeric(df[rpc_col], errors='coerce')
+                # Log NaN counts to debug conversion issues
+                nan_count = df[rpc_col].isna().sum()
+                if nan_count > 0:
+                    logger.warning(f"Found {nan_count} NaN values in RPC column after conversion")
                 # Drop rows where conversion failed
                 df = df.dropna(subset=[rpc_col])
                 logger.info(f"Converted {rpc_col} to numeric with {len(df)} valid rows")
@@ -1467,12 +1586,21 @@ def process_csv_file(file_path):
                 logger.error(f"Could not convert RPC column to numeric: {str(e)}")
                 return None
         
+        # Print converted RPC values
+        if not df.empty:
+            logger.info(f"Converted RPC values: {df[rpc_col].head(3).tolist()}")
+            logger.info(f"RPC column min: {df[rpc_col].min()}, max: {df[rpc_col].max()}, mean: {df[rpc_col].mean()}")
+        
         # Get threshold from environment variable or use default
         rpc_threshold = float(os.getenv('RPC_THRESHOLD', 12.0))
         logger.info(f"Using RPC threshold of ${rpc_threshold}")
         
         # Filter for targets below the threshold
         low_rpc_targets = df[df[rpc_col] < rpc_threshold][[target_col, rpc_col]].copy()
+        
+        # Log threshold comparison
+        logger.info(f"Found {len(low_rpc_targets)} targets with RPC < ${rpc_threshold}")
+        logger.info(f"Found {len(df[df[rpc_col] >= rpc_threshold])} targets with RPC >= ${rpc_threshold}")
         
         # Sort by RPC (ascending)
         low_rpc_targets = low_rpc_targets.sort_values(by=rpc_col)
@@ -1495,6 +1623,8 @@ def process_csv_file(file_path):
             
     except Exception as e:
         logger.error(f"Error processing CSV file: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 def check_time_range(current_time, target_time, window_minutes=30):
