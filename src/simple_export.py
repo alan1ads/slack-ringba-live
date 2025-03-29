@@ -38,6 +38,7 @@ import pickle
 import requests
 import base64
 import csv
+import schedule
 
 # Load environment variables
 load_dotenv()
@@ -508,22 +509,27 @@ def click_export_csv(browser):
             }, true);
         """)
         
-        # Find all possible download directories (keep existing code)
+        # Find all possible download directories - ONLY USE WRITABLE DIRECTORIES
         download_dir = "/tmp"
         possible_download_dirs = [
             "/tmp", 
             "/tmp/downloads",
-            "/downloads",
-            "/home/chrome/downloads",
-            os.environ.get("HOME", "") + "/Downloads" if os.environ.get("HOME") else "",
+            os.path.join(os.environ.get("HOME", ""), "downloads"),
             os.path.join(os.getcwd(), "downloads"),
-            os.path.join(os.getcwd(), "tmp")
+            os.path.join(os.environ.get("HOME", ""), "tmp")
         ]
         
         # Filter out empty paths and ensure directories exist
-        possible_download_dirs = [d for d in possible_download_dirs if d]
+        possible_download_dirs = [d for d in possible_download_dirs if d and d != '/downloads']
         for d in possible_download_dirs:
-            os.makedirs(d, exist_ok=True)
+            try:
+                os.makedirs(d, exist_ok=True)
+                logger.info(f"Created/verified directory: {d}")
+            except Exception as e:
+                logger.warning(f"Could not create directory {d}: {e}")
+                # Remove from list if we can't create it
+                if d in possible_download_dirs:
+                    possible_download_dirs.remove(d)
             
         logger.info(f"Checking for downloads in these directories: {possible_download_dirs}")
         
@@ -1979,6 +1985,69 @@ def perform_test_run():
         logger.error(f"Error during test run: {str(e)}")
         return False
 
+def main():
+    """Main function that runs the export process based on schedule or command-line arguments"""
+    try:
+        # Get run_label from environment variable or command line argument
+        run_label = os.getenv('RUN_LABEL', '').lower() or (sys.argv[1].lower() if len(sys.argv) > 1 else '')
+        
+        # Set up times for scheduled checks
+        morning_check_time = os.getenv('MORNING_CHECK_TIME', '11:00')
+        midday_check_time = os.getenv('MIDDAY_CHECK_TIME', '14:00')
+        afternoon_check_time = os.getenv('AFTERNOON_CHECK_TIME', '16:30')
+        
+        logger.info(f"Scheduled check times: Morning={morning_check_time}, Midday={midday_check_time}, Afternoon={afternoon_check_time}")
+        
+        # If command-line argument or env var specifies a specific run, do it immediately
+        if run_label in ['morning', 'midday', 'afternoon']:
+            logger.info(f"Running {run_label} check immediately based on label")
+            export_csv()
+            logger.info("Script execution complete")
+            return
+            
+        # If running in Render.com cron job with manual runs, just run once and exit
+        if os.environ.get('RENDER') and (os.environ.get('RENDER_SERVICE_TYPE') == 'cron'):
+            logger.info("Running in Render.com cron job mode")
+            export_csv()
+            logger.info("Script execution complete")
+            return
+            
+        # For scheduled operation, set up schedule
+        logger.info("Setting up scheduled checks...")
+        
+        # Schedule the checks
+        schedule.every().monday.at(morning_check_time).do(export_csv).tag('ringba')
+        schedule.every().tuesday.at(morning_check_time).do(export_csv).tag('ringba')
+        schedule.every().wednesday.at(morning_check_time).do(export_csv).tag('ringba')
+        schedule.every().thursday.at(morning_check_time).do(export_csv).tag('ringba')
+        schedule.every().friday.at(morning_check_time).do(export_csv).tag('ringba')
+        
+        schedule.every().monday.at(midday_check_time).do(export_csv).tag('ringba')
+        schedule.every().tuesday.at(midday_check_time).do(export_csv).tag('ringba')
+        schedule.every().wednesday.at(midday_check_time).do(export_csv).tag('ringba')
+        schedule.every().thursday.at(midday_check_time).do(export_csv).tag('ringba')
+        schedule.every().friday.at(midday_check_time).do(export_csv).tag('ringba')
+        
+        schedule.every().monday.at(afternoon_check_time).do(export_csv).tag('ringba')
+        schedule.every().tuesday.at(afternoon_check_time).do(export_csv).tag('ringba')
+        schedule.every().wednesday.at(afternoon_check_time).do(export_csv).tag('ringba')
+        schedule.every().thursday.at(afternoon_check_time).do(export_csv).tag('ringba')
+        schedule.every().friday.at(afternoon_check_time).do(export_csv).tag('ringba')
+        
+        logger.info("Scheduler set up. Waiting for scheduled times...")
+        
+        while True:
+            schedule.run_pending()
+            time.sleep(60)  # Check every minute
+            
+    except KeyboardInterrupt:
+        logger.info("Script interrupted by user")
+    except Exception as e:
+        logger.error(f"Error in main function: {str(e)}")
+        send_results_to_slack(f"Error in main function: {str(e)}", error=True)
+    finally:
+        logger.info("Script execution complete")
+
 if __name__ == "__main__":
     # Check if we're running as a web service (PORT environment variable is set)
     is_web_service = bool(os.getenv('PORT'))
@@ -2017,7 +2086,7 @@ if __name__ == "__main__":
         
         try:
             # Run export
-            export_csv()
+            main()
         except Exception as e:
             logger.error(f"Unhandled exception in main process: {str(e)}")
         finally:
