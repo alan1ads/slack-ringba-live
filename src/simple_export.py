@@ -146,6 +146,15 @@ def setup_browser():
         # Create Chrome options with MINIMAL configuration
         chrome_options = webdriver.ChromeOptions()
         
+        # Get $HOME/bin path
+        home_bin = os.path.join(os.environ.get('HOME', ''), 'bin')
+        chrome_path = os.path.join(os.environ.get('HOME', ''), 'chrome', 'chrome')
+        
+        # Check if we're in Render environment with local Chrome install
+        if os.path.exists(chrome_path):
+            logger.info(f"Using local Chrome installation: {chrome_path}")
+            chrome_options.binary_location = chrome_path
+        
         # Essential options only - stripped down to bare minimum
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
@@ -185,8 +194,15 @@ def setup_browser():
         # Log the final Chrome options
         logger.info(f"Setting up Chrome with minimal options: {chrome_options.arguments}")
         
-        # Create the browser
-        browser = webdriver.Chrome(options=chrome_options)
+        # Create the browser - check for chromedriver in $HOME/bin first
+        if os.path.exists(os.path.join(home_bin, 'chromedriver')):
+            logger.info(f"Using local ChromeDriver: {os.path.join(home_bin, 'chromedriver')}")
+            service = Service(executable_path=os.path.join(home_bin, 'chromedriver'))
+            browser = webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            # Fall back to system ChromeDriver
+            logger.info("Using system ChromeDriver")
+            browser = webdriver.Chrome(options=chrome_options)
         
         # Set shorter timeouts
         browser.set_page_load_timeout(60)
