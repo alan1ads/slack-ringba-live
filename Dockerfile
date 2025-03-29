@@ -12,22 +12,28 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Chrome stable (minimal install)
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Get Chrome version and install matching ChromeDriver
-RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | awk -F. '{print $1}') \
-    && wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}" -O LATEST_RELEASE \
-    && CHROMEDRIVER_VERSION=$(cat LATEST_RELEASE) \
-    && wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" \
-    && unzip chromedriver_linux64.zip \
-    && mv chromedriver /usr/local/bin/chromedriver \
+# Install ChromeDriver using direct download from Chrome for Testing
+RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1-3) \
+    && echo "Chrome version: $CHROME_VERSION" \
+    && mkdir -p /tmp/chromedriver \
+    && cd /tmp/chromedriver \
+    && wget -q https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_STABLE \
+    && CFT_VERSION=$(cat LATEST_RELEASE_STABLE) \
+    && echo "Using Chrome for Testing version: $CFT_VERSION" \
+    && wget -q "https://storage.googleapis.com/chrome-for-testing-public/$CFT_VERSION/linux64/chromedriver-linux64.zip" \
+    && unzip chromedriver-linux64.zip \
+    && mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
-    && rm chromedriver_linux64.zip LATEST_RELEASE
+    && rm -rf /tmp/chromedriver \
+    && echo "ChromeDriver installed at: $(which chromedriver)" \
+    && chromedriver --version || echo "ChromeDriver version check failed, but continuing"
 
 # Create app directory 
 WORKDIR /app

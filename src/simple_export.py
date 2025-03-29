@@ -1711,6 +1711,90 @@ def send_afternoon_comparison_to_slack(targets_df, went_below_df, previous_run_n
         logger.error(f"Error sending afternoon comparison results to Slack: {str(e)}")
         return False
 
+def send_results_to_slack(message, results=None, error=False, screenshot_path=None):
+    """Send results to Slack webhook"""
+    try:
+        webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+        if not webhook_url:
+            logger.error("No Slack webhook URL found in environment variables")
+            return False
+            
+        logger.info(f"Sending {'error' if error else 'results'} to Slack")
+        
+        # Construct the Slack message payload
+        payload = {
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*{'⚠️ ERROR' if error else '📊 RPC RESULTS'}*\n{message}"
+                    }
+                }
+            ]
+        }
+        
+        # Add results table if results are provided
+        if results is not None and not error and isinstance(results, pd.DataFrame) and not results.empty:
+            # Format the results for Slack
+            targets_text = ""
+            
+            # Format the targets data
+            for _, row in results.iterrows():
+                target_name = row.get('Target Name', 'Unknown')
+                rpc = float(row.get('RPC', 0.0))
+                calls = int(row.get('Calls', 0))
+                revenue = float(row.get('Revenue', 0.0))
+                
+                targets_text += f"• *{target_name}*\n"
+                targets_text += f"  - RPC: ${rpc:.2f}\n"
+                targets_text += f"  - Calls: {calls}\n"
+                targets_text += f"  - Revenue: ${revenue:.2f}\n\n"
+            
+            if targets_text:
+                payload["blocks"].append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": targets_text
+                    }
+                })
+            
+        # Add screenshot if provided
+        if screenshot_path and os.path.exists(screenshot_path):
+            logger.info(f"Attaching screenshot: {screenshot_path}")
+            
+            # Upload the screenshot to Slack
+            with open(screenshot_path, 'rb') as img:
+                response = requests.post(
+                    'https://slack.com/api/files.upload',
+                    data={
+                        'channels': os.getenv('SLACK_CHANNEL', ''),
+                        'title': 'Screenshot',
+                        'filename': os.path.basename(screenshot_path),
+                        'initial_comment': 'Screenshot attached'
+                    },
+                    files={'file': img},
+                    headers={'Authorization': f'Bearer {os.getenv("SLACK_BOT_TOKEN", "")}'} 
+                )
+                
+                if response.status_code != 200 or not response.json().get('ok', False):
+                    logger.warning(f"Failed to upload screenshot: {response.json()}")
+        
+        # Send the message
+        response = requests.post(webhook_url, json=payload)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to send message to Slack: {response.status_code} {response.text}")
+            return False
+            
+        logger.info("Sent notification to Slack")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error sending to Slack: {str(e)}")
+        return False
+
 def export_csv():
     """Export CSV from Ringba and notify Slack for any targets with RPC below threshold"""
     browser = None
