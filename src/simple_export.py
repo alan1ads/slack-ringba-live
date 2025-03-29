@@ -2011,6 +2011,13 @@ def main():
             export_csv()
             logger.info("Script execution complete")
             return
+        
+        # If running in Render.com Background Worker, do immediate check
+        if os.environ.get('RENDER') and (os.environ.get('RENDER_SERVICE_TYPE') == 'worker'):
+            logger.info("Running in Render.com Background Worker mode - doing immediate check")
+            export_csv()
+            logger.info("Initial check complete. Will exit to let Render handle scheduling.")
+            return
             
         # For scheduled operation, set up schedule
         logger.info("Setting up scheduled checks...")
@@ -2036,9 +2043,23 @@ def main():
         
         logger.info("Scheduler set up. Waiting for scheduled times...")
         
+        heartbeat_counter = 0
         while True:
             schedule.run_pending()
-            time.sleep(60)  # Check every minute
+            
+            # Add heartbeat every minute to prevent Render.com timeout
+            heartbeat_counter += 1
+            if heartbeat_counter >= 60:
+                now = datetime.now()
+                next_run = schedule.next_run()
+                if next_run:
+                    time_until_next = next_run - now
+                    logger.info(f"Heartbeat: Still alive. Next check in {time_until_next}")
+                else:
+                    logger.info(f"Heartbeat: Still alive. No scheduled checks pending.")
+                heartbeat_counter = 0
+                
+            time.sleep(1)  # Check every second
             
     except KeyboardInterrupt:
         logger.info("Script interrupted by user")
