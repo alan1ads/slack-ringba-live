@@ -3,12 +3,9 @@ services:
   - type: worker
     name: ringba-export-service
     env: python
-    buildCommand: |
-      chmod +x ./setup_chrome.sh
-      ./setup_chrome.sh
-      pip install -r requirements.txt
-    startCommand: python src/simple_export.py
     runtime: python3.9
+    buildCommand: chmod +x render-setup.sh && ./render-setup.sh
+    startCommand: python src/simple_export.py
     plan: starter
     branch: main
     envVars:
@@ -16,10 +13,6 @@ services:
         value: "1"
       - key: CHROME_OPTIONS
         value: "--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --single-process --disable-extensions"
-      - key: SHM_SIZE
-        value: "2g"
-      - key: NODE_OPTIONS
-        value: "--max-old-space-size=2048"
       - key: PATH
         value: "$HOME/bin:$PATH"
       - key: RPC_THRESHOLD
@@ -44,13 +37,10 @@ services:
   - type: cron
     name: ringba-csv-exporter-morning
     env: python
-    buildCommand: |
-      chmod +x ./setup_chrome.sh
-      ./setup_chrome.sh
-      pip install -r requirements.txt
+    runtime: python3.9
+    buildCommand: chmod +x render-setup.sh && ./render-setup.sh
     startCommand: python src/simple_export.py
     schedule: "0 11 * * 1-5"
-    runtime: python3.9
     plan: starter
     branch: main
     envVars:
@@ -78,13 +68,10 @@ services:
   - type: cron
     name: ringba-csv-exporter-midday
     env: python
-    buildCommand: |
-      chmod +x ./setup_chrome.sh
-      ./setup_chrome.sh
-      pip install -r requirements.txt
+    runtime: python3.9
+    buildCommand: chmod +x render-setup.sh && ./render-setup.sh
     startCommand: python src/simple_export.py
     schedule: "0 14 * * 1-5"
-    runtime: python3.9
     plan: starter
     branch: main
     envVars:
@@ -112,13 +99,10 @@ services:
   - type: cron
     name: ringba-csv-exporter-afternoon
     env: python
-    buildCommand: |
-      chmod +x ./setup_chrome.sh
-      ./setup_chrome.sh
-      pip install -r requirements.txt
+    runtime: python3.9
+    buildCommand: chmod +x render-setup.sh && ./render-setup.sh
     startCommand: python src/simple_export.py
     schedule: "30 16 * * 1-5"
-    runtime: python3.9
     plan: starter
     branch: main
     envVars:
