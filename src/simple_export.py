@@ -140,34 +140,42 @@ def debug_environment():
 def setup_browser():
     """Set up the Chrome browser with absolute minimum resources for container environments"""
     try:
-        # Debug environment variables 
-        logger.info(f"Chrome options from env: {os.getenv('CHROME_OPTIONS', 'Not set')}")
+        # Find Chrome and ChromeDriver in PATH or HOME directory
+        chrome_path = None
+        chromedriver_path = None
         
+        # Check HOME/bin first (Render.com setup)
+        home_bin = os.path.join(os.environ.get('HOME', ''), 'bin')
+        home_chrome = os.path.join(os.environ.get('HOME', ''), 'chrome', 'chrome')
+        
+        if os.path.exists(os.path.join(home_bin, 'google-chrome')):
+            chrome_path = os.path.join(home_bin, 'google-chrome')
+            logger.info(f"Using Chrome from HOME/bin: {chrome_path}")
+        elif os.path.exists(home_chrome):
+            chrome_path = home_chrome
+            logger.info(f"Using Chrome from HOME/chrome: {chrome_path}")
+            
+        if os.path.exists(os.path.join(home_bin, 'chromedriver')):
+            chromedriver_path = os.path.join(home_bin, 'chromedriver')
+            logger.info(f"Using ChromeDriver from HOME/bin: {chromedriver_path}")
+            
         # Create Chrome options with MINIMAL configuration
         chrome_options = webdriver.ChromeOptions()
         
-        # Get $HOME/bin path
-        home_bin = os.path.join(os.environ.get('HOME', ''), 'bin')
-        chrome_path = os.path.join(os.environ.get('HOME', ''), 'chrome', 'chrome')
-        
-        # Check if we're in Render environment with local Chrome install
-        if os.path.exists(chrome_path):
-            logger.info(f"Using local Chrome installation: {chrome_path}")
+        # Set Chrome binary location if found
+        if chrome_path:
             chrome_options.binary_location = chrome_path
-        
+            
         # Essential options only - stripped down to bare minimum
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        
-        # Add critical memory-saving options
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-software-rasterizer") 
         chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-features=site-per-process")
-        chrome_options.add_argument("--js-flags=--expose-gc")
-        chrome_options.add_argument("--single-process")  # Use single process to reduce memory
-        chrome_options.add_argument("--window-size=800,600")  # Smaller window size
+        
+        # Use smaller window and memory footprint
+        chrome_options.add_argument("--window-size=800,600")
+        chrome_options.add_argument("--single-process")
         
         # Set page load strategy to minimize resource usage
         chrome_options.page_load_strategy = 'eager'
@@ -192,26 +200,22 @@ def setup_browser():
         os.environ["DOWNLOAD_DIR"] = download_dir
         
         # Log the final Chrome options
-        logger.info(f"Setting up Chrome with minimal options: {chrome_options.arguments}")
+        logger.info(f"Setting up Chrome with options: {chrome_options.arguments}")
         
-        # Create the browser - check for chromedriver in $HOME/bin first
-        if os.path.exists(os.path.join(home_bin, 'chromedriver')):
-            logger.info(f"Using local ChromeDriver: {os.path.join(home_bin, 'chromedriver')}")
-            service = Service(executable_path=os.path.join(home_bin, 'chromedriver'))
+        # Create the browser
+        if chromedriver_path:
+            logger.info(f"Using ChromeDriver path: {chromedriver_path}")
+            service = Service(executable_path=chromedriver_path)
             browser = webdriver.Chrome(service=service, options=chrome_options)
         else:
-            # Fall back to system ChromeDriver
             logger.info("Using system ChromeDriver")
             browser = webdriver.Chrome(options=chrome_options)
         
-        # Set shorter timeouts
+        # Set timeouts
         browser.set_page_load_timeout(60)
         browser.implicitly_wait(10)
         
-        # Add a memory management hook - periodically call JS garbage collection
-        browser.execute_script("window.gc = function() { if (window.gc) window.gc(); };")
-        
-        logger.info("Chrome browser set up successfully with minimal configuration")
+        logger.info("Chrome browser set up successfully")
         return browser
     except Exception as e:
         logger.error(f"Failed to set up browser: {str(e)}")
