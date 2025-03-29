@@ -422,18 +422,32 @@ def click_export_csv(browser):
         # Take screenshot to see page state
         take_screenshot(browser, "before_export_attempt")
         
-        # NEW: Add JavaScript that intercepts blob URLs and download events 
-        logger.info("Setting up blob URL interception...")
+        # Enhanced JavaScript that intercepts blob URLs and download events 
+        logger.info("Setting up enhanced blob URL interception...")
         browser.execute_script("""
             // Store blob URLs and download data
             window.blobUrls = [];
             window.downloadData = null;
+            window.csvContent = null;
             
-            // Override createObjectURL to capture blob URLs
+            // Debug logging helper
+            function logDownloadInfo(message) {
+                console.log('[Download Debug] ' + message);
+                // Also store in a global array for access from Selenium
+                if (!window.downloadLogs) window.downloadLogs = [];
+                window.downloadLogs.push({
+                    time: new Date().toISOString(),
+                    message: message
+                });
+            }
+            
+            logDownloadInfo('Setting up blob interception');
+            
+            // Track all blobs
             const originalCreateObjectURL = URL.createObjectURL;
             URL.createObjectURL = function(object) {
                 const url = originalCreateObjectURL(object);
-                console.log('Captured blob URL:', url);
+                logDownloadInfo('Blob URL created: ' + url + ' (type: ' + (object.type || 'unknown') + ', size: ' + object.size + ')');
                 
                 // Store the blob and URL
                 window.blobUrls.push({
@@ -449,24 +463,27 @@ def click_export_csv(browser):
                      object.type === 'application/vnd.ms-excel' ||
                      object.type === '')) {
                     
-                    console.log('Found potential CSV blob:', object.type, object.size);
+                    logDownloadInfo('Found potential CSV blob: ' + object.type + ', ' + object.size);
                     
                     // Read the blob
                     const reader = new FileReader();
                     reader.onload = function() {
                         const content = reader.result;
-                        console.log('Read blob content, length:', content.length);
+                        logDownloadInfo('Read blob content, length: ' + content.length);
                         
-                        // Simple CSV check
+                        // Simple CSV check - look for commas and newlines
                         if (content.includes(',') && 
                             (content.includes('\\n') || content.includes('\\r'))) {
                             
+                            window.csvContent = content;
+                            logDownloadInfo('Saved CSV content from blob of size: ' + content.length);
+                            
+                            // Store download data in format expected by the Python code
                             window.downloadData = {
                                 content: content,
                                 timestamp: Date.now(),
                                 type: object.type || 'text/csv'
                             };
-                            console.log('Saved CSV content from blob');
                         }
                     };
                     reader.readAsText(object);
@@ -475,38 +492,228 @@ def click_export_csv(browser):
                 return url;
             };
             
-            // Monitor anchor downloads
+            // Monitor all XMLHttpRequests to catch CSV responses
+            const originalXhrOpen = XMLHttpRequest.prototype.open;
+            const originalXhrSend = XMLHttpRequest.prototype.send;
+            
+            XMLHttpRequest.prototype.open = function(method, url) {
+                this._method = method;
+                this._url = url;
+                
+                // Check if this might be related to a download or export
+                if (typeof url === 'string' && (
+                    url.includes('export') || 
+                    url.includes('download') ||
+                    url.includes('csv') ||
+                    url.includes('call-logs')
+                )) {
+                    logDownloadInfo('Monitoring XHR: ' + method + ' ' + url);
+                    this._isMonitored = true;
+                }
+                
+                return originalXhrOpen.apply(this, arguments);
+            };
+            
+            XMLHttpRequest.prototype.send = function() {
+                if (this._isMonitored) {
+                    const xhr = this;
+                    
+                    // Store the original onreadystatechange
+                    const originalOnReadyStateChange = xhr.onreadystatechange;
+                    
+                    xhr.onreadystatechange = function() {
+                        if (xhr.readyState === 4) {
+                            // Request completed
+                            if (xhr.status >= 200 && xhr.status < 300) {
+                                // Success
+                                logDownloadInfo('XHR completed: ' + xhr._url);
+                                
+                                // Check if response looks like CSV
+                                const contentType = xhr.getResponseHeader('Content-Type');
+                                if (contentType && (
+                                    contentType.includes('csv') || 
+                                    contentType.includes('text/plain') ||
+                                    contentType.includes('octet-stream')
+                                )) {
+                                    logDownloadInfo('Found CSV response in XHR: ' + contentType);
+                                    
+                                    // Save the CSV content
+                                    window.csvContent = xhr.responseText;
+                                    window.downloadData = {
+                                        content: xhr.responseText,
+                                        timestamp: Date.now(),
+                                        type: contentType
+                                    };
+                                }
+                                else if (xhr._url.includes('call-logs')) {
+                                    logDownloadInfo('Found call logs response, checking content');
+                                    
+                                    // Try to detect if content is CSV
+                                    try {
+                                        const text = xhr.responseText;
+                                        if (text && text.includes(',') && 
+                                            (text.includes('\\n') || text.includes('\\r'))) {
+                                            
+                                            logDownloadInfo('Content appears to be CSV, length: ' + text.length);
+                                            window.csvContent = text;
+                                            window.downloadData = {
+                                                content: text,
+                                                timestamp: Date.now(),
+                                                type: 'text/csv'
+                                            };
+                                        }
+                                    } catch (e) {
+                                        logDownloadInfo('Error checking XHR content: ' + e);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Call the original onreadystatechange
+                        if (originalOnReadyStateChange) {
+                            originalOnReadyStateChange.apply(xhr, arguments);
+                        }
+                    };
+                }
+                
+                return originalXhrSend.apply(this, arguments);
+            };
+            
+            // Monitor all fetch requests too
+            const originalFetch = window.fetch;
+            window.fetch = function(input, init) {
+                // Determine URL
+                const url = (typeof input === 'string') ? input : input.url;
+                
+                if (url && (
+                    url.includes('export') || 
+                    url.includes('download') ||
+                    url.includes('csv') ||
+                    url.includes('call-logs')
+                )) {
+                    logDownloadInfo('Monitoring fetch: ' + url);
+                    
+                    // Return a Promise that wraps the original fetch
+                    return originalFetch.apply(this, arguments)
+                        .then(response => {
+                            // Clone the response so we can read it twice
+                            const clone = response.clone();
+                            
+                            // Check content type
+                            const contentType = clone.headers.get('Content-Type');
+                            if (contentType && (
+                                contentType.includes('csv') || 
+                                contentType.includes('text/plain') ||
+                                contentType.includes('octet-stream')
+                            )) {
+                                logDownloadInfo('Found CSV in fetch response: ' + contentType);
+                                
+                                // Read and store the content
+                                clone.text().then(text => {
+                                    window.csvContent = text;
+                                    window.downloadData = {
+                                        content: text,
+                                        timestamp: Date.now(),
+                                        type: contentType
+                                    };
+                                });
+                            }
+                            
+                            // Return the original response
+                            return response;
+                        });
+                }
+                
+                // Not a monitored URL, just pass through
+                return originalFetch.apply(this, arguments);
+            };
+            
+            // Monitor download clicks
             document.addEventListener('click', function(e) {
                 let target = e.target;
                 
-                // Look for download links
+                // Check if clicked element or its parent is a button/link containing "export" or "csv"
                 while (target && target !== document) {
-                    if (target.tagName === 'A' && target.href && target.href.startsWith('blob:')) {
-                        console.log('Intercepted blob download click:', target.href);
+                    // Check for common download indicators
+                    const isDownloadElem = 
+                        (target.tagName === 'A' && target.href && target.href.startsWith('blob:')) ||
+                        (target.tagName === 'BUTTON' && 
+                          (target.textContent.toLowerCase().includes('export') || 
+                           target.textContent.toLowerCase().includes('csv')));
+                    
+                    if (isDownloadElem) {
+                        logDownloadInfo('Export/download element clicked: ' + target.tagName + 
+                                        ' text: ' + target.textContent.trim());
                         
-                        // Find the matching blob URL
-                        const blobInfo = window.blobUrls.find(b => b.url === target.href);
-                        if (blobInfo && blobInfo.blob) {
-                            // Read the blob
-                            const reader = new FileReader();
-                            reader.onload = function() {
-                                const content = reader.result;
-                                console.log('Read blob content from click, length:', content.length);
-                                
-                                // Store the download data
-                                window.downloadData = {
-                                    content: content,
-                                    timestamp: Date.now(),
-                                    type: blobInfo.blob.type || 'text/csv'
+                        // For blob URLs, try to read the content
+                        if (target.tagName === 'A' && target.href && target.href.startsWith('blob:')) {
+                            logDownloadInfo('Blob URL clicked: ' + target.href);
+                            
+                            // Find matching blob
+                            const blobInfo = window.blobUrls.find(b => b.url === target.href);
+                            if (blobInfo && blobInfo.blob) {
+                                // Read the blob content
+                                const reader = new FileReader();
+                                reader.onload = function() {
+                                    const content = reader.result;
+                                    logDownloadInfo('Read blob from click, length: ' + content.length);
+                                    
+                                    window.csvContent = content;
+                                    window.downloadData = {
+                                        content: content,
+                                        timestamp: Date.now(),
+                                        type: blobInfo.blob.type || 'text/csv'
+                                    };
                                 };
-                                console.log('Saved CSV content from click');
-                            };
-                            reader.readAsText(blobInfo.blob);
+                                reader.readAsText(blobInfo.blob);
+                            }
                         }
                     }
+                    
                     target = target.parentElement;
                 }
             }, true);
+
+            // Export additional helper to actually trigger the export
+            window.triggerExportButtonClick = function() {
+                logDownloadInfo('Manually triggering export button click');
+                
+                // Find the export button using different methods
+                const buttons = Array.from(document.querySelectorAll('button, a, span, div'))
+                    .filter(el => el.textContent && 
+                        (el.textContent.toLowerCase().includes('export') || 
+                         el.textContent.toLowerCase().includes('csv')));
+                
+                if (buttons.length > 0) {
+                    // Sort by likelihood of being the export button
+                    buttons.sort((a, b) => {
+                        // Exact match gets highest priority
+                        const aText = a.textContent.toLowerCase().trim();
+                        const bText = b.textContent.toLowerCase().trim();
+                        
+                        if (aText === 'export csv' && bText !== 'export csv') return -1;
+                        if (bText === 'export csv' && aText !== 'export csv') return 1;
+                        
+                        // Button elements get priority
+                        if (a.tagName === 'BUTTON' && b.tagName !== 'BUTTON') return -1;
+                        if (b.tagName === 'BUTTON' && a.tagName !== 'BUTTON') return 1;
+                        
+                        // Otherwise sort by simplicity/brevity of text
+                        return aText.length - bText.length;
+                    });
+                    
+                    // Click the best candidate
+                    const button = buttons[0];
+                    logDownloadInfo('Clicking: ' + button.tagName + ' with text: ' + button.textContent.trim());
+                    button.click();
+                    return 'Clicked button: ' + button.textContent.trim();
+                } else {
+                    logDownloadInfo('No export buttons found');
+                    return 'No buttons found';
+                }
+            };
+            
+            logDownloadInfo('Download interception setup complete');
         """)
         
         # Find all possible download directories - ONLY USE WRITABLE DIRECTORIES
@@ -514,9 +721,9 @@ def click_export_csv(browser):
         possible_download_dirs = [
             "/tmp", 
             "/tmp/downloads",
-            os.path.join(os.environ.get("HOME", ""), "downloads"),
-            os.path.join(os.getcwd(), "downloads"),
-            os.path.join(os.environ.get("HOME", ""), "tmp")
+            "/opt/render/downloads",
+            "/opt/render/project/src/downloads",
+            "/opt/render/tmp"
         ]
         
         # Filter out empty paths and ensure directories exist
@@ -545,217 +752,140 @@ def click_export_csv(browser):
             except Exception as e:
                 logger.warning(f"Error checking directory {d}: {str(e)}")
         
-        # Setup download tracking without modifying userAgent
-        logger.info("Setting up download tracking...")
-        browser.execute_script("""
-            // Track download activity
-            window.downloadActivity = {
-                clicked: false,
-                buttonElements: [],
-                timestamp: null,
-                message: null
-            };
-            
-            // Monitor download-related events
-            document.addEventListener('click', function(e) {
-                let target = e.target;
-                
-                // Check if clicked element or its parent is a button/link containing "export" or "csv"
-                while (target && target !== document) {
-                    if (target.tagName === 'BUTTON' || target.tagName === 'A' || 
-                        target.getAttribute('role') === 'button') {
-                        
-                        // Check if text content contains export/csv
-                        if (target.textContent && 
-                            (target.textContent.toLowerCase().includes('export') || 
-                             target.textContent.toLowerCase().includes('csv'))) {
-                            
-                            console.log('Export button clicked:', target);
-                            window.downloadActivity.clicked = true;
-                            window.downloadActivity.buttonElements.push({
-                                tagName: target.tagName,
-                                id: target.id,
-                                className: target.className,
-                                textContent: target.textContent,
-                                time: new Date().toISOString()
-                            });
-                            window.downloadActivity.timestamp = Date.now();
-                            window.downloadActivity.message = 'Export button clicked at ' + new Date().toISOString();
-                        }
-                    }
-                    target = target.parentElement;
-                }
-            }, true);
-            
-            // Intercept potential download triggers
-            const originalOpen = XMLHttpRequest.prototype.open;
-            XMLHttpRequest.prototype.open = function() {
-                this._method = arguments[0];
-                this._url = arguments[1];
-                
-                // Check if this might be related to a download
-                if (this._url && (
-                    this._url.includes('export') || 
-                    this._url.includes('download') ||
-                    this._url.includes('csv')
-                )) {
-                    console.log('Potential download XHR:', this._method, this._url);
-                    
-                    if (!window.downloadActivity.message) {
-                        window.downloadActivity.message = 'Download XHR detected: ' + this._url;
-                    }
-                }
-                
-                return originalOpen.apply(this, arguments);
-            };
-        """)
-        
-        # Try direct API approach for getting call logs
-        # Use CDP protocol to monitor network requests and intercept the API response
-        logger.info("Setting up network interception for API monitoring...")
-        browser.execute_cdp_cmd('Network.enable', {})
-        browser.execute_cdp_cmd('Network.setRequestInterception', {'patterns': [{'urlPattern': '**/ringba/call-logs*', 'resourceType': 'XHR', 'interceptionStage': 'HeadersReceived'}]})
-        
-        # Create a variable to store API data
-        browser.execute_script("""
-            window.apiResponses = [];
-            window.callLogsData = null;
-        """)
-        
-        # Track network responses for call logs API
-        browser.execute_cdp_cmd('Network.requestIntercepted', lambda params: browser.execute_cdp_cmd('Network.getResponseBodyForInterception', 
-            {'interceptionId': params['interceptionId']}).then(
-                lambda body: browser.execute_script("""
-                    try {
-                        const data = JSON.parse(arguments[0]);
-                        console.log('Intercepted API response with ' + (data.length || 0) + ' items');
-                        window.apiResponses.push({
-                            timestamp: Date.now(),
-                            data: data
-                        });
-                        window.callLogsData = data;
-                    } catch(e) {
-                        console.error('Failed to parse API data:', e);
-                    }
-                """, body['body'])
-            ))
-        
-        # Click the export button
+        # Click the export button using our enhanced methods
         export_clicked = False
         
         logger.info("Looking for and clicking the EXPORT CSV button...")
         try:
-            # Try JavaScript approach first
-            result = browser.execute_script("""
-                // Find EXPORT button - more comprehensive approach
-                function findExportButton() {
-                    // Save all candidates we find
-                    const candidates = [];
-                    
-                    // 1. Look for elements with "export" or "csv" in text 
-                    document.querySelectorAll('button, a, span, div').forEach(el => {
-                        if (el.textContent && (
-                            el.textContent.toLowerCase().includes('export') || 
-                            el.textContent.toLowerCase().includes('csv')
-                        )) {
-                            candidates.push({
-                                element: el,
-                                score: 10,  // Base score
-                                text: el.textContent.trim()
-                            });
-                        }
-                    });
-                    
-                    // 2. Check for elements with id/class containing export
-                    document.querySelectorAll('[id*="export" i], [class*="export" i], [data-test*="export" i]').forEach(el => {
-                        // Add if not already in candidates
-                        if (!candidates.some(c => c.element === el)) {
-                            candidates.push({
-                                element: el,
-                                score: 5,
-                                text: el.textContent.trim()
-                            });
-                        } else {
-                            // Increase score of existing candidate
-                            const existing = candidates.find(c => c.element === el);
-                            existing.score += 5;
-                        }
-                    });
-                    
-                    // Score adjustments based on various factors
-                    candidates.forEach(c => {
-                        // Exact match for "EXPORT CSV" gets highest score
-                        if (c.text.toLowerCase() === 'export csv') {
-                            c.score += 20;
-                        }
-                        
-                        // Button elements get a bonus
-                        if (c.element.tagName === 'BUTTON') {
-                            c.score += 5;
-                        }
-                        
-                        // Visible elements get a bonus
-                        const style = window.getComputedStyle(c.element);
-                        if (style.display !== 'none' && style.visibility !== 'hidden' && 
-                            c.element.offsetWidth > 0 && c.element.offsetHeight > 0) {
-                            c.score += 10;
-                        }
-                    });
-                    
-                    // Sort by score (highest first)
-                    candidates.sort((a, b) => b.score - a.score);
-                    
-                    console.log('Found ' + candidates.length + ' export button candidates');
-                    candidates.forEach((c, i) => {
-                        console.log(`Candidate ${i}: ${c.element.tagName} "${c.text}" - Score: ${c.score}`);
-                    });
-                    
-                    return candidates.length > 0 ? candidates[0].element : null;
-                }
-                
-                // Find and click the export button
-                const exportButton = findExportButton();
-                if (exportButton) {
-                    console.log('Clicking export button:', exportButton.outerHTML);
-                    exportButton.click();
-                    return true;
-                }
-                
-                return false;
-            """)
+            # Try our JavaScript helper first
+            result = browser.execute_script("return window.triggerExportButtonClick();")
+            logger.info(f"JavaScript export button click result: {result}")
+            export_clicked = True
             
-            if result:
-                logger.info("Successfully clicked export button with JavaScript")
-                export_clicked = True
-            else:
-                # Fall back to Selenium approach
-                logger.warning("JavaScript approach failed, trying Selenium...")
+            # If that didn't work, try our previous methods
+            if not result or "No buttons found" in result:
+                # Fall back to our normal search approach
+                result = browser.execute_script("""
+                    // Find EXPORT button - more comprehensive approach
+                    function findExportButton() {
+                        // Save all candidates we find
+                        const candidates = [];
+                        
+                        // 1. Look for elements with "export" or "csv" in text 
+                        document.querySelectorAll('button, a, span, div').forEach(el => {
+                            if (el.textContent && (
+                                el.textContent.toLowerCase().includes('export') || 
+                                el.textContent.toLowerCase().includes('csv')
+                            )) {
+                                candidates.push({
+                                    element: el,
+                                    score: 10,  // Base score
+                                    text: el.textContent.trim()
+                                });
+                            }
+                        });
+                        
+                        // 2. Check for elements with id/class containing export
+                        document.querySelectorAll('[id*="export" i], [class*="export" i], [data-test*="export" i]').forEach(el => {
+                            // Add if not already in candidates
+                            if (!candidates.some(c => c.element === el)) {
+                                candidates.push({
+                                    element: el,
+                                    score: 5,
+                                    text: el.textContent.trim()
+                                });
+                            } else {
+                                // Increase score of existing candidate
+                                const existing = candidates.find(c => c.element === el);
+                                existing.score += 5;
+                            }
+                        });
+                        
+                        // Score adjustments based on various factors
+                        candidates.forEach(c => {
+                            // Exact match for "EXPORT CSV" gets highest score
+                            if (c.text.toLowerCase() === 'export csv') {
+                                c.score += 20;
+                            }
+                            
+                            // Button elements get a bonus
+                            if (c.element.tagName === 'BUTTON') {
+                                c.score += 5;
+                            }
+                            
+                            // Visible elements get a bonus
+                            const style = window.getComputedStyle(c.element);
+                            if (style.display !== 'none' && style.visibility !== 'hidden' && 
+                                c.element.offsetWidth > 0 && c.element.offsetHeight > 0) {
+                                c.score += 10;
+                            }
+                        });
+                        
+                        // Sort by score (highest first)
+                        candidates.sort((a, b) => b.score - a.score);
+                        
+                        console.log('Found ' + candidates.length + ' export button candidates');
+                        candidates.forEach((c, i) => {
+                            console.log(`Candidate ${i}: ${c.element.tagName} "${c.text}" - Score: ${c.score}`);
+                        });
+                        
+                        return candidates.length > 0 ? candidates[0].element : null;
+                    }
+                    
+                    // Find and click the export button
+                    const exportButton = findExportButton();
+                    if (exportButton) {
+                        console.log('Clicking export button:', exportButton.outerHTML);
+                        exportButton.click();
+                        return true;
+                    }
+                    
+                    return false;
+                """)
                 
-                # Try different locators
-                locators = [
-                    (By.XPATH, "//button[contains(text(), 'Export')]"),
-                    (By.XPATH, "//button[contains(text(), 'CSV')]"),
-                    (By.XPATH, "//span[contains(text(), 'Export')]"),
-                    (By.CSS_SELECTOR, "[id*='export']"),
-                    (By.CSS_SELECTOR, "[class*='export']"),
-                    (By.CSS_SELECTOR, "[title*='Export']"),
-                ]
-                
-                for locator_type, locator_value in locators:
-                    try:
-                        element = browser.find_element(locator_type, locator_value)
-                        logger.info(f"Found export button with locator: {locator_value}")
-                        element.click()
-                        export_clicked = True
-                        break
-                    except Exception as e:
-                        logger.warning(f"Could not find/click with locator {locator_value}: {str(e)}")
+                if result:
+                    logger.info("Successfully clicked export button with JavaScript")
+                    export_clicked = True
+                else:
+                    # Fall back to Selenium approach
+                    logger.warning("JavaScript approach failed, trying Selenium...")
+                    
+                    # Try different locators
+                    locators = [
+                        (By.XPATH, "//button[contains(text(), 'EXPORT CSV')]"),
+                        (By.XPATH, "//button[contains(text(), 'Export')]"),
+                        (By.XPATH, "//button[contains(text(), 'CSV')]"),
+                        (By.XPATH, "//span[contains(text(), 'Export')]"),
+                        (By.CSS_SELECTOR, "[id*='export']"),
+                        (By.CSS_SELECTOR, "[class*='export']"),
+                        (By.CSS_SELECTOR, "[title*='Export']"),
+                    ]
+                    
+                    for locator_type, locator_value in locators:
+                        try:
+                            element = browser.find_element(locator_type, locator_value)
+                            logger.info(f"Found export button with locator: {locator_value}")
+                            element.click()
+                            export_clicked = True
+                            break
+                        except Exception as e:
+                            logger.warning(f"Could not find/click with locator {locator_value}: {str(e)}")
         
         except Exception as e:
             logger.error(f"Error clicking export button: {str(e)}")
         
         # Take screenshot after clicking export
         take_screenshot(browser, "after_export_attempt")
+        
+        # Get download logs even if we couldn't click export
+        try:
+            download_logs = browser.execute_script("return window.downloadLogs || [];")
+            if download_logs:
+                logger.info("Download debug logs from browser:")
+                for log_entry in download_logs:
+                    logger.info(f"  {log_entry.get('time', '')}: {log_entry.get('message', '')}")
+        except Exception as e:
+            logger.warning(f"Could not retrieve download logs: {str(e)}")
         
         if not export_clicked:
             logger.error("Could not click export button with any method")
@@ -766,56 +896,38 @@ def click_export_csv(browser):
         wait_time = 60  # 1 minute wait maximum
         start_time = time.time()
         
-        # First try to get data directly from the intercepted blob 
+        # First try to get data directly from the intercepted content
         while time.time() - start_time < wait_time:
-            # NEW: Check for blob data first
-            download_data = browser.execute_script("return window.downloadData;")
-            if download_data and download_data.get('content'):
-                logger.info("Found download data directly from blob interception!")
-                
-                # Save the content to a file
-                file_path = os.path.join("/tmp", f"blob_download_{int(time.time())}.csv")
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(download_data['content'])
-                
-                logger.info(f"Saved blob data to {file_path}")
-                
-                # Verify it's a valid CSV
+            # Check for download data from JavaScript interception
+            for data_var in ["downloadData", "csvContent"]:
                 try:
-                    df = pd.read_csv(file_path)
-                    logger.info(f"Successfully read CSV from blob with {len(df)} rows and {len(df.columns)} columns")
-                    return file_path
+                    csv_data = browser.execute_script(f"return window.{data_var};")
+                    if csv_data:
+                        if isinstance(csv_data, dict) and csv_data.get('content'):
+                            csv_content = csv_data.get('content')
+                        else:
+                            csv_content = csv_data
+                            
+                        if csv_content and isinstance(csv_content, str):
+                            logger.info(f"Found download data directly from {data_var}!")
+                            
+                            # Save the content to a file
+                            file_path = os.path.join("/tmp", f"blob_download_{int(time.time())}.csv")
+                            
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(csv_content)
+                            
+                            logger.info(f"Saved blob data to {file_path}")
+                            
+                            # Verify it's a valid CSV
+                            try:
+                                df = pd.read_csv(file_path)
+                                logger.info(f"Successfully read CSV with {len(df)} rows and {len(df.columns)} columns")
+                                return file_path
+                            except Exception as e:
+                                logger.warning(f"Data is not a valid CSV: {str(e)}")
                 except Exception as e:
-                    logger.warning(f"Blob data is not a valid CSV: {str(e)}")
-            
-            # NEW: Check for intercepted API data
-            api_data = browser.execute_script("return window.callLogsData;")
-            if api_data:
-                logger.info("Found call logs data from API interception!")
-                
-                # Convert API data to DataFrame and save as CSV
-                try:
-                    # Save API data to file
-                    file_path = os.path.join("/tmp", f"api_data_{int(time.time())}.csv")
-                    
-                    # Convert JSON array to string to save
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(str(api_data))
-                    
-                    logger.info(f"Saved raw API data to {file_path}")
-                    
-                    # Try to convert to DataFrame and save as CSV
-                    api_file_path = os.path.join("/tmp", f"api_data_processed_{int(time.time())}.csv")
-                    
-                    # Convert API data to DataFrame
-                    df = pd.DataFrame(api_data)
-                    df.to_csv(api_file_path, index=False)
-                    
-                    logger.info(f"Successfully converted API data to CSV with {len(df)} rows")
-                    return api_file_path
-                except Exception as e:
-                    logger.warning(f"Failed to process API data: {str(e)}")
+                    logger.warning(f"Error checking {data_var}: {str(e)}")
             
             # Check if there are any new CSV files in the download directories
             new_files = []
@@ -852,11 +964,6 @@ def click_export_csv(browser):
                 except Exception as e:
                     logger.warning(f"File {newest_file} is not a valid CSV: {str(e)}")
             
-            # Check download activity from browser
-            download_activity = browser.execute_script("return window.downloadActivity || {};")
-            if download_activity:
-                logger.info(f"Download activity: {download_activity}")
-            
             # Log progress every 10 seconds
             elapsed = int(time.time() - start_time)
             if elapsed % 10 == 0:
@@ -866,7 +973,7 @@ def click_export_csv(browser):
         
         logger.warning("No new CSV files found after waiting")
         
-        # NEW: Try to extract data directly from the table on the page
+        # Try to extract data directly from the table on the page
         logger.info("No downloads found. Attempting to extract data directly from the page...")
         table_data = browser.execute_script("""
             // Find any data tables on the page
