@@ -422,6 +422,158 @@ def click_export_csv(browser):
         # Take screenshot to see page state
         take_screenshot(browser, "before_export_attempt")
         
+        # APPROACH 1: First try to extract data directly from the table - this is more reliable in container environments
+        logger.info("First extracting table data directly from page (most reliable method)...")
+        table_data = browser.execute_script("""
+            // Find all tables and grid components in the page
+            const tables = document.querySelectorAll('table');
+            console.log(`Found ${tables.length} tables on page`);
+            
+            const gridElements = document.querySelectorAll('[role="grid"], [role="table"], .grid, .table, .data-grid');
+            console.log(`Found ${gridElements.length} grid elements on page`);
+            
+            // Find row elements that might contain data
+            const rowElements = document.querySelectorAll('[role="row"], tr, .row');
+            console.log(`Found ${rowElements.length} row elements on page`);
+            
+            // Function to extract data from standard table 
+            function extractFromTable(table) {
+                const headers = [];
+                const rows = [];
+                
+                // Get headers from thead or first row
+                const headerCells = table.querySelectorAll('th') || table.querySelectorAll('tr:first-child td');
+                headerCells.forEach(cell => headers.push(cell.textContent.trim()));
+                
+                // Get data rows
+                const dataRows = table.querySelectorAll('tbody tr') || table.querySelectorAll('tr:not(:first-child)');
+                dataRows.forEach(row => {
+                    const rowData = {};
+                    const cells = row.querySelectorAll('td');
+                    for (let i = 0; i < Math.min(cells.length, headers.length || cells.length); i++) {
+                        rowData[headers[i] || `Column${i+1}`] = cells[i].textContent.trim();
+                    }
+                    if (Object.keys(rowData).length > 0) {
+                        rows.push(rowData);
+                    }
+                });
+                
+                return { headers, rows };
+            }
+            
+            // Function to extract from Angular/React grid components 
+            function extractFromGrid(grid) {
+                const headers = [];
+                const rows = [];
+                
+                // Try to get headers from different possible structures
+                const headerCells = grid.querySelectorAll('[role="columnheader"], .header-cell, .column-header, th');
+                headerCells.forEach(cell => headers.push(cell.textContent.trim()));
+                
+                // Try to get rows from different possible structures  
+                const dataRows = grid.querySelectorAll('[role="row"], .row, .data-row');
+                dataRows.forEach(row => {
+                    const rowData = {};
+                    const cells = row.querySelectorAll('[role="cell"], .cell, .data-cell, td');
+                    for (let i = 0; i < Math.min(cells.length, headers.length || cells.length); i++) {
+                        rowData[headers[i] || `Column${i+1}`] = cells[i].textContent.trim();
+                    }
+                    if (Object.keys(rowData).length > 0) {
+                        rows.push(rowData);
+                    }
+                });
+                
+                return { headers, rows };
+            }
+            
+            // Extract data from all tables and grids and find the best one
+            let bestData = null;
+            let maxRows = 0;
+            
+            // Try tables first
+            tables.forEach(table => {
+                const data = extractFromTable(table);
+                if (data.rows.length > maxRows) {
+                    maxRows = data.rows.length;
+                    bestData = data;
+                }
+            });
+            
+            // Then try grid components
+            gridElements.forEach(grid => {
+                const data = extractFromGrid(grid);
+                if (data.rows.length > maxRows) {
+                    maxRows = data.rows.length;
+                    bestData = data;
+                }
+            });
+            
+            // If we still don't have data, try scanning all rows that might contain data
+            if (!bestData || bestData.rows.length === 0) {
+                console.log("No table data found, trying to scan all row elements...");
+                
+                // Try to infer structure from consistent row patterns
+                const possibleDataRows = Array.from(rowElements).filter(row => {
+                    // Look for rows with multiple cells/elements that might be data
+                    const cells = row.querySelectorAll('td, .cell, [role="cell"], div');
+                    return cells.length >= 3; // Assume rows with at least 3 cells might be data
+                });
+                
+                if (possibleDataRows.length > 0) {
+                    // Take the first row as a pattern and try to extract consistent data
+                    const patternRow = possibleDataRows[0];
+                    const cellElements = patternRow.querySelectorAll('td, .cell, [role="cell"], div');
+                    
+                    // Create header names based on position
+                    const inferredHeaders = [];
+                    for (let i = 0; i < cellElements.length; i++) {
+                        inferredHeaders.push(`Column${i+1}`);
+                    }
+                    
+                    // Extract data from all rows following this pattern
+                    const inferredRows = [];
+                    possibleDataRows.forEach(row => {
+                        const cells = row.querySelectorAll('td, .cell, [role="cell"], div');
+                        if (cells.length >= 3) {
+                            const rowData = {};
+                            for (let i = 0; i < cells.length; i++) {
+                                rowData[inferredHeaders[i]] = cells[i].textContent.trim();
+                            }
+                            inferredRows.push(rowData);
+                        }
+                    });
+                    
+                    if (inferredRows.length > maxRows) {
+                        bestData = {
+                            headers: inferredHeaders,
+                            rows: inferredRows
+                        };
+                    }
+                }
+            }
+            
+            // Return the best data found
+            return bestData;
+        """)
+        
+        if table_data and table_data.get('rows') and len(table_data.get('rows')) > 0:
+            logger.info(f"Successfully extracted table data directly: {len(table_data['rows'])} rows")
+            
+            # Save to CSV
+            download_dir = "/tmp"
+            os.makedirs(download_dir, exist_ok=True)
+            file_path = os.path.join(download_dir, f"direct_extract_{int(time.time())}.csv")
+            
+            # Convert to DataFrame and save
+            df = pd.DataFrame(table_data['rows'])
+            df.to_csv(file_path, index=False)
+            
+            logger.info(f"Saved directly extracted data to {file_path}")
+            return file_path
+        else:
+            logger.warning("Could not extract table data directly, will try button click")
+        
+        # APPROACH 2: Try to click the export button and intercept the download
         # Enhanced JavaScript that intercepts blob URLs and download events 
         logger.info("Setting up enhanced blob URL interception...")
         browser.execute_script("""
@@ -674,19 +826,58 @@ def click_export_csv(browser):
                 }
             }, true);
 
-            // Export additional helper to actually trigger the export
-            window.triggerExportButtonClick = function() {
-                logDownloadInfo('Manually triggering export button click');
+            // Export specific helper to find the Export CSV button exactly as shown in screenshot
+            window.findAndClickExportButton = function() {
+                logDownloadInfo('Looking for EXPORT CSV button...');
                 
-                // Find the export button using different methods
-                const buttons = Array.from(document.querySelectorAll('button, a, span, div'))
+                // Specific approach for finding the exact EXPORT CSV button from the screenshot
+                // Find by button text matching exactly "EXPORT CSV"
+                const exactButtonMatches = Array.from(document.querySelectorAll('button'))
+                    .filter(el => el.textContent.trim() === 'EXPORT CSV');
+                
+                if (exactButtonMatches.length > 0) {
+                    const button = exactButtonMatches[0];
+                    logDownloadInfo('Found exact EXPORT CSV button: ' + button.outerHTML);
+                    button.click();
+                    return 'Clicked exact EXPORT CSV button';
+                }
+                
+                // Try upper corner button in data grid section
+                const upperCornerButtons = Array.from(document.querySelectorAll('button'))
+                    .filter(b => {
+                        // Check if button is in upper right of a section/component
+                        const rect = b.getBoundingClientRect();
+                        const isInUpperRight = rect.top < window.innerHeight / 2 && rect.right > window.innerWidth / 2;
+                        return isInUpperRight && b.textContent.toLowerCase().includes('export');
+                    });
+                
+                if (upperCornerButtons.length > 0) {
+                    const button = upperCornerButtons[0];
+                    logDownloadInfo('Found upper corner export button: ' + button.outerHTML);
+                    button.click();
+                    return 'Clicked upper corner export button';
+                }
+                
+                // Find by matching style from screenshot - button with class containing "export"
+                const styledButtons = Array.from(document.querySelectorAll('button[class*="export"], button[class*="csv"], .export-button'))
+                    .filter(b => b.textContent.toLowerCase().includes('export') || b.textContent.toLowerCase().includes('csv'));
+                
+                if (styledButtons.length > 0) {
+                    const button = styledButtons[0];
+                    logDownloadInfo('Found export button by style: ' + button.outerHTML);
+                    button.click();
+                    return 'Clicked export button by style';
+                }
+                
+                // Look for generic export buttons
+                const exportButtons = Array.from(document.querySelectorAll('button, a, span, div'))
                     .filter(el => el.textContent && 
                         (el.textContent.toLowerCase().includes('export') || 
                          el.textContent.toLowerCase().includes('csv')));
                 
-                if (buttons.length > 0) {
+                if (exportButtons.length > 0) {
                     // Sort by likelihood of being the export button
-                    buttons.sort((a, b) => {
+                    exportButtons.sort((a, b) => {
                         // Exact match gets highest priority
                         const aText = a.textContent.toLowerCase().trim();
                         const bText = b.textContent.toLowerCase().trim();
@@ -703,14 +894,14 @@ def click_export_csv(browser):
                     });
                     
                     // Click the best candidate
-                    const button = buttons[0];
+                    const button = exportButtons[0];
                     logDownloadInfo('Clicking: ' + button.tagName + ' with text: ' + button.textContent.trim());
                     button.click();
                     return 'Clicked button: ' + button.textContent.trim();
-                } else {
-                    logDownloadInfo('No export buttons found');
-                    return 'No buttons found';
                 }
+                
+                logDownloadInfo('No export buttons found');
+                return 'No buttons found';
             };
             
             logDownloadInfo('Download interception setup complete');
@@ -757,119 +948,62 @@ def click_export_csv(browser):
         
         logger.info("Looking for and clicking the EXPORT CSV button...")
         try:
-            # Try our JavaScript helper first
-            result = browser.execute_script("return window.triggerExportButtonClick();")
+            # Try our specific finder for the Export CSV button from screenshot
+            result = browser.execute_script("return window.findAndClickExportButton();")
             logger.info(f"JavaScript export button click result: {result}")
             export_clicked = True
             
-            # If that didn't work, try our previous methods
-            if not result or "No buttons found" in result:
-                # Fall back to our normal search approach
-                result = browser.execute_script("""
-                    // Find EXPORT button - more comprehensive approach
-                    function findExportButton() {
-                        // Save all candidates we find
-                        const candidates = [];
-                        
-                        // 1. Look for elements with "export" or "csv" in text 
-                        document.querySelectorAll('button, a, span, div').forEach(el => {
-                            if (el.textContent && (
-                                el.textContent.toLowerCase().includes('export') || 
-                                el.textContent.toLowerCase().includes('csv')
-                            )) {
-                                candidates.push({
-                                    element: el,
-                                    score: 10,  // Base score
-                                    text: el.textContent.trim()
-                                });
-                            }
-                        });
-                        
-                        // 2. Check for elements with id/class containing export
-                        document.querySelectorAll('[id*="export" i], [class*="export" i], [data-test*="export" i]').forEach(el => {
-                            // Add if not already in candidates
-                            if (!candidates.some(c => c.element === el)) {
-                                candidates.push({
-                                    element: el,
-                                    score: 5,
-                                    text: el.textContent.trim()
-                                });
-                            } else {
-                                // Increase score of existing candidate
-                                const existing = candidates.find(c => c.element === el);
-                                existing.score += 5;
-                            }
-                        });
-                        
-                        // Score adjustments based on various factors
-                        candidates.forEach(c => {
-                            // Exact match for "EXPORT CSV" gets highest score
-                            if (c.text.toLowerCase() === 'export csv') {
-                                c.score += 20;
-                            }
-                            
-                            // Button elements get a bonus
-                            if (c.element.tagName === 'BUTTON') {
-                                c.score += 5;
-                            }
-                            
-                            // Visible elements get a bonus
-                            const style = window.getComputedStyle(c.element);
-                            if (style.display !== 'none' && style.visibility !== 'hidden' && 
-                                c.element.offsetWidth > 0 && c.element.offsetHeight > 0) {
-                                c.score += 10;
-                            }
-                        });
-                        
-                        // Sort by score (highest first)
-                        candidates.sort((a, b) => b.score - a.score);
-                        
-                        console.log('Found ' + candidates.length + ' export button candidates');
-                        candidates.forEach((c, i) => {
-                            console.log(`Candidate ${i}: ${c.element.tagName} "${c.text}" - Score: ${c.score}`);
-                        });
-                        
-                        return candidates.length > 0 ? candidates[0].element : null;
-                    }
-                    
-                    // Find and click the export button
-                    const exportButton = findExportButton();
-                    if (exportButton) {
-                        console.log('Clicking export button:', exportButton.outerHTML);
-                        exportButton.click();
-                        return true;
-                    }
-                    
-                    return false;
-                """)
+            # If that didn't work, use Selenium to try specific XPath or CSS selector
+            if "No buttons found" in result:
+                logger.warning("JavaScript button finder failed, trying Selenium...")
                 
-                if result:
-                    logger.info("Successfully clicked export button with JavaScript")
+                # Try specific XPath matching the screenshot's EXPORT CSV button
+                try:
+                    # Try precise XPath for EXPORT CSV button in upper right corner
+                    export_button = browser.find_element(By.XPATH, "//button[text()='EXPORT CSV']")
+                    logger.info("Found EXPORT CSV button with exact text match")
+                    export_button.click()
                     export_clicked = True
-                else:
-                    # Fall back to Selenium approach
-                    logger.warning("JavaScript approach failed, trying Selenium...")
+                except Exception as e1:
+                    logger.warning(f"Exact EXPORT CSV button not found: {str(e1)}")
                     
-                    # Try different locators
-                    locators = [
-                        (By.XPATH, "//button[contains(text(), 'EXPORT CSV')]"),
-                        (By.XPATH, "//button[contains(text(), 'Export')]"),
-                        (By.XPATH, "//button[contains(text(), 'CSV')]"),
-                        (By.XPATH, "//span[contains(text(), 'Export')]"),
-                        (By.CSS_SELECTOR, "[id*='export']"),
-                        (By.CSS_SELECTOR, "[class*='export']"),
-                        (By.CSS_SELECTOR, "[title*='Export']"),
-                    ]
-                    
-                    for locator_type, locator_value in locators:
-                        try:
-                            element = browser.find_element(locator_type, locator_value)
-                            logger.info(f"Found export button with locator: {locator_value}")
-                            element.click()
-                            export_clicked = True
-                            break
-                        except Exception as e:
-                            logger.warning(f"Could not find/click with locator {locator_value}: {str(e)}")
+                    # Try CSS selector from screenshot context
+                    try:
+                        export_button = browser.find_element(By.CSS_SELECTOR, ".export-csv-button, button.export, [data-test='export-csv-button']")
+                        logger.info("Found export button with CSS selector")
+                        export_button.click()
+                        export_clicked = True
+                    except Exception as e2:
+                        logger.warning(f"CSS selector approach failed: {str(e2)}")
+                        
+                        # Try general button finding
+                        locators = [
+                            (By.XPATH, "//button[contains(text(), 'EXPORT CSV')]"),
+                            (By.XPATH, "//button[contains(text(), 'Export CSV')]"),
+                            (By.XPATH, "//button[contains(text(), 'EXPORT')]"),
+                            (By.XPATH, "//button[contains(text(), 'Export')]"),
+                            (By.XPATH, "//button[contains(text(), 'CSV')]"),
+                            (By.CSS_SELECTOR, "[id*='export']"),
+                            (By.CSS_SELECTOR, "[class*='export']"),
+                        ]
+                        
+                        for locator_type, locator_value in locators:
+                            try:
+                                elements = browser.find_elements(locator_type, locator_value)
+                                if elements:
+                                    logger.info(f"Found {len(elements)} export buttons with {locator_value}")
+                                    for el in elements:
+                                        try:
+                                            logger.info(f"Trying to click button: {el.text}")
+                                            el.click()
+                                            export_clicked = True
+                                            break
+                                        except:
+                                            continue
+                                    if export_clicked:
+                                        break
+                            except Exception as e:
+                                logger.warning(f"Error with locator {locator_value}: {str(e)}")
         
         except Exception as e:
             logger.error(f"Error clicking export button: {str(e)}")
@@ -889,11 +1023,12 @@ def click_export_csv(browser):
         
         if not export_clicked:
             logger.error("Could not click export button with any method")
+            # Return to direct data extraction as fallback
             return None
         
         # Wait for download to complete
         logger.info("Waiting for download to complete...")
-        wait_time = 60  # 1 minute wait maximum
+        wait_time = 30  # 30 seconds wait maximum - reduced from 60
         start_time = time.time()
         
         # First try to get data directly from the intercepted content
@@ -969,127 +1104,11 @@ def click_export_csv(browser):
             if elapsed % 10 == 0:
                 logger.info(f"Still waiting for download... ({elapsed}s elapsed)")
             
-            time.sleep(3)
+            time.sleep(2)
         
         logger.warning("No new CSV files found after waiting")
         
-        # Try to extract data directly from the table on the page
-        logger.info("No downloads found. Attempting to extract data directly from the page...")
-        table_data = browser.execute_script("""
-            // Find any data tables on the page
-            const tables = document.querySelectorAll('table');
-            console.log(`Found ${tables.length} tables on page`);
-            
-            // Function to extract data from table
-            function extractFromTable(table) {
-                const rows = [];
-                const headers = [];
-                
-                // Get headers
-                const headerRow = table.querySelector('thead tr') || table.querySelector('tr');
-                if (headerRow) {
-                    const headerCells = headerRow.querySelectorAll('th, td');
-                    for (const cell of headerCells) {
-                        headers.push(cell.textContent.trim());
-                    }
-                }
-                
-                // Get data rows - start from second row if we used the first for headers
-                const dataRows = table.querySelectorAll('tbody tr, tr');
-                const startIdx = (table.querySelector('thead')) ? 0 : 1;
-                
-                for (let i = startIdx; i < dataRows.length; i++) {
-                    const row = dataRows[i];
-                    const cells = row.querySelectorAll('td');
-                    
-                    if (cells.length === 0) continue;
-                    
-                    const rowData = {};
-                    for (let j = 0; j < Math.min(cells.length, headers.length); j++) {
-                        rowData[headers[j] || `Column${j+1}`] = cells[j].textContent.trim();
-                    }
-                    
-                    if (Object.keys(rowData).length > 0) {
-                        rows.push(rowData);
-                    }
-                }
-                
-                return { headers, rows };
-            }
-            
-            // Extract from all tables and find the one with most rows
-            let bestTable = null;
-            let maxRows = 0;
-            
-            for (const table of tables) {
-                const data = extractFromTable(table);
-                if (data.rows.length > maxRows) {
-                    maxRows = data.rows.length;
-                    bestTable = data;
-                }
-            }
-            
-            if (bestTable && bestTable.rows.length > 0) {
-                return bestTable;
-            }
-            
-            // If no tables found, check for grid components
-            const grids = document.querySelectorAll('[role="grid"], .ag-root, .data-grid');
-            console.log(`Found ${grids.length} grid components`);
-            
-            if (grids.length > 0) {
-                // Extract from first grid (assuming it's the main one)
-                const grid = grids[0];
-                const headers = [];
-                const rows = [];
-                
-                // Find headers
-                const headerCells = grid.querySelectorAll('[role="columnheader"], .ag-header-cell');
-                for (const cell of headerCells) {
-                    headers.push(cell.textContent.trim());
-                }
-                
-                // Find rows
-                const rowElements = grid.querySelectorAll('[role="row"], .ag-row');
-                for (const row of rowElements) {
-                    const cells = row.querySelectorAll('[role="cell"], .ag-cell');
-                    
-                    if (cells.length === 0) continue;
-                    
-                    const rowData = {};
-                    for (let j = 0; j < Math.min(cells.length, headers.length || cells.length); j++) {
-                        rowData[headers[j] || `Column${j+1}`] = cells[j].textContent.trim();
-                    }
-                    
-                    if (Object.keys(rowData).length > 0) {
-                        rows.push(rowData);
-                    }
-                }
-                
-                if (rows.length > 0) {
-                    return { headers, rows };
-                }
-            }
-            
-            return null;
-        """)
-        
-        if table_data and table_data.get('rows') and len(table_data.get('rows')) > 0:
-            logger.info(f"Successfully extracted {len(table_data['rows'])} rows directly from page")
-            
-            # Save to CSV
-            download_dir = "/tmp"
-            os.makedirs(download_dir, exist_ok=True)
-            file_path = os.path.join(download_dir, f"page_extract_{int(time.time())}.csv")
-            
-            # Convert to DataFrame and save
-            df = pd.DataFrame(table_data['rows'])
-            df.to_csv(file_path, index=False)
-            
-            logger.info(f"Saved extracted data to {file_path}")
-            return file_path
-        
-        # Try the Ringba API as fallback
+        # APPROACH 3: Fall back to trying the API (though it was failing with 404 in logs)
         logger.info("Trying Ringba API as fallback...")
         try:
             api_token = os.getenv('RINGBA_API_TOKEN')
@@ -1108,15 +1127,15 @@ def click_export_csv(browser):
                     'Accept': 'application/json'
                 }
                 
-                # Try the call logs API endpoint
-                call_logs_url = f"https://api.ringba.com/v2/ringba/accounts/{account_id}/call-logs"
+                # Try the call logs API endpoint with different path
+                call_logs_url = f"https://api.ringba.com/v2/accounts/{account_id}/call-logs"
                 params = {
                     'startDate': start_date,
                     'endDate': end_date,
                     'format': 'csv'
                 }
                 
-                logger.info(f"Making API request to: {call_logs_url}")
+                logger.info(f"Making revised API request to: {call_logs_url}")
                 response = requests.get(call_logs_url, headers=headers, params=params)
                 
                 if response.status_code == 200:
