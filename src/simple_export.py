@@ -419,8 +419,463 @@ def click_export_csv(browser):
             logger.error(f"Failed to navigate to summary page: {str(e)}")
             take_screenshot(browser, "navigation_failed")
         
-        # Take screenshot to see page state
+        # Take screenshot of the full page
         take_screenshot(browser, "before_table_extraction")
+        
+        # Take additional debugging screenshots of the page structure
+        browser.execute_script("""
+            // Highlight table elements for debugging
+            const tables = document.querySelectorAll('table, [role="grid"], [role="table"]');
+            const oldBorders = [];
+            
+            tables.forEach((table, i) => {
+                oldBorders[i] = table.style.border;
+                table.style.border = '5px solid red';
+                table.setAttribute('data-debug', 'highlighted-table-' + i);
+            });
+            
+            // Highlight headers
+            const headers = document.querySelectorAll('th, [role="columnheader"]');
+            headers.forEach((header, i) => {
+                header.style.backgroundColor = 'yellow';
+                header.setAttribute('data-debug', 'highlighted-header-' + i);
+            });
+            
+            // Add debug info
+            const debugDiv = document.createElement('div');
+            debugDiv.style.position = 'fixed';
+            debugDiv.style.top = '0';
+            debugDiv.style.left = '0';
+            debugDiv.style.backgroundColor = 'rgba(0,0,0,0.8)';
+            debugDiv.style.color = 'white';
+            debugDiv.style.padding = '10px';
+            debugDiv.style.zIndex = '9999';
+            debugDiv.style.maxHeight = '200px';
+            debugDiv.style.overflow = 'auto';
+            
+            debugDiv.innerHTML = `
+                <div>Tables found: ${tables.length}</div>
+                <div>Headers found: ${headers.length}</div>
+                <div>Headers text: ${Array.from(headers).map(h => h.textContent.trim()).join(', ')}</div>
+            `;
+            
+            document.body.appendChild(debugDiv);
+        """)
+        
+        # Take a screenshot with highlighted elements
+        take_screenshot(browser, "table_elements_highlighted")
+        
+        # Get page HTML for debugging
+        page_html = browser.execute_script("return document.documentElement.outerHTML;")
+        html_path = os.path.join(screenshots_dir, f"{int(time.time())}_page_source.html")
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(page_html)
+        logger.info(f"Saved page HTML to {html_path}")
+        
+        # Get detailed DOM info about table elements
+        table_info = browser.execute_script("""
+            const tables = document.querySelectorAll('table, [role="grid"], [role="table"]');
+            const tableInfo = [];
+            
+            tables.forEach((table, i) => {
+                const cells = table.querySelectorAll('td, th, [role="cell"], [role="columnheader"]');
+                const rows = table.querySelectorAll('tr, [role="row"]');
+                
+                tableInfo.push({
+                    index: i,
+                    tag: table.tagName,
+                    id: table.id,
+                    className: table.className,
+                    cellCount: cells.length,
+                    rowCount: rows.length,
+                    isVisible: table.offsetParent !== null,
+                    rect: {
+                        top: table.getBoundingClientRect().top,
+                        left: table.getBoundingClientRect().left,
+                        width: table.getBoundingClientRect().width,
+                        height: table.getBoundingClientRect().height
+                    }
+                });
+            });
+            
+            return tableInfo;
+        """)
+        
+        # Log detailed table information
+        if table_info:
+            logger.info(f"Found {len(table_info)} potential tables on page:")
+            for i, table in enumerate(table_info):
+                logger.info(f"Table {i}: {table.get('tag', 'unknown')} (class='{table.get('className', '')}', id='{table.get('id', '')}') - {table.get('rowCount', 0)} rows, {table.get('cellCount', 0)} cells, visible: {table.get('isVisible', False)}")
+        else:
+            logger.warning("No tables found on page for debugging")
+        
+        # Try direct Ringba UI structure extraction
+        logger.info("Trying direct extraction based on Ringba UI structure...")
+        ringba_structure_data = browser.execute_script("""
+            console.log('Starting direct Ringba UI structure extraction...');
+            
+            // Specific to Ringba UI - look for the Summary section with the table
+            function extractRingbaUI() {
+                // Look for the "Summary" text/header on the page
+                const summaryHeaders = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, div'))
+                    .filter(el => el.textContent.trim() === 'Summary');
+                
+                console.log(`Found ${summaryHeaders.length} Summary headers`);
+                
+                // Look for the campaign/target/publisher column headers in ANY context
+                const targetColumnTextContent = ['Campaign', 'Publisher', 'Target', 'Buyer', 'RPC', 'Revenue'];
+                const columnHeaders = [];
+                
+                // Find all elements with these text contents
+                targetColumnTextContent.forEach(text => {
+                    const elements = Array.from(document.querySelectorAll('*'))
+                        .filter(el => el.textContent.trim() === text);
+                    
+                    if (elements.length > 0) {
+                        console.log(`Found ${elements.length} elements with text "${text}"`);
+                        columnHeaders.push(...elements);
+                    }
+                });
+                
+                // If we found column headers, try to find their parent table
+                if (columnHeaders.length > 0) {
+                    console.log(`Found ${columnHeaders.length} potential column headers`);
+                    
+                    // Group headers that are in the same container (likely the same row)
+                    const headerGroups = {};
+                    columnHeaders.forEach(header => {
+                        // Look for parent elements that might be a row or header container
+                        let parent = header.parentElement;
+                        let depth = 0;
+                        const maxDepth = 5; // Don't go too far up the tree
+                        
+                        while (parent && depth < maxDepth) {
+                            const key = parent.tagName + '|' + parent.className;
+                            if (!headerGroups[key]) {
+                                headerGroups[key] = { element: parent, headers: [] };
+                            }
+                            headerGroups[key].headers.push({
+                                element: header,
+                                text: header.textContent.trim()
+                            });
+                            parent = parent.parentElement;
+                            depth++;
+                        }
+                    });
+                    
+                    // Find the parent with the most headers (likely the header row)
+                    let bestParent = null;
+                    let maxHeaders = 0;
+                    
+                    Object.values(headerGroups).forEach(group => {
+                        if (group.headers.length > maxHeaders) {
+                            maxHeaders = group.headers.length;
+                            bestParent = group.element;
+                        }
+                    });
+                    
+                    if (bestParent) {
+                        console.log(`Found header container with ${maxHeaders} headers`);
+                        
+                        // Try to find the table this header belongs to
+                        let tableElement = null;
+                        let parent = bestParent;
+                        let depth = 0;
+                        const maxDepth = 5;
+                        
+                        while (parent && depth < maxDepth) {
+                            if (parent.tagName === 'TABLE' || 
+                                parent.getAttribute('role') === 'grid' || 
+                                parent.getAttribute('role') === 'table') {
+                                tableElement = parent;
+                                break;
+                            }
+                            
+                            // Also check if this element contains rows and cells
+                            const hasCells = parent.querySelectorAll('td, th, [role="cell"], [role="columnheader"]').length > 0;
+                            const hasRows = parent.querySelectorAll('tr, [role="row"]').length > 0;
+                            
+                            if (hasCells && hasRows) {
+                                tableElement = parent;
+                                break;
+                            }
+                            
+                            parent = parent.parentElement;
+                            depth++;
+                        }
+                        
+                        if (tableElement) {
+                            console.log('Found table element containing headers');
+                            
+                            // Extract all headers from this row
+                            const headerRow = bestParent;
+                            const headerCells = headerRow.querySelectorAll('th, td, div, span');
+                            const headers = Array.from(headerCells)
+                                .map(cell => cell.textContent.trim())
+                                .filter(text => text.length > 0);
+                            
+                            console.log('Extracted headers:', headers);
+                            
+                            // Find all rows that might contain data
+                            // 1. Look for siblings of the header row
+                            let dataRows = [];
+                            const siblings = [];
+                            let sibling = headerRow.nextElementSibling;
+                            
+                            while (sibling) {
+                                siblings.push(sibling);
+                                sibling = sibling.nextElementSibling;
+                            }
+                            
+                            if (siblings.length > 0) {
+                                console.log(`Found ${siblings.length} sibling rows`);
+                                dataRows = siblings;
+                            } else {
+                                // 2. Look for children of the table that are not the header row
+                                const allRows = tableElement.querySelectorAll('tr, [role="row"], div[class*="row"]');
+                                dataRows = Array.from(allRows).filter(row => row !== headerRow);
+                                console.log(`Found ${dataRows.length} potential data rows`);
+                            }
+                            
+                            // Extract data from rows
+                            const rows = [];
+                            dataRows.forEach(row => {
+                                // Get all cells in this row
+                                const cells = row.querySelectorAll('td, [role="cell"], div, span');
+                                if (cells.length === 0) return;
+                                
+                                const rowData = {};
+                                const cellTexts = Array.from(cells)
+                                    .map(cell => cell.textContent.trim())
+                                    .filter(text => text.length > 0);
+                                
+                                // Map cell texts to headers
+                                for (let i = 0; i < Math.min(cellTexts.length, headers.length); i++) {
+                                    rowData[headers[i]] = cellTexts[i];
+                                }
+                                
+                                // Only include rows with sufficient data
+                                if (Object.keys(rowData).length >= 2) {
+                                    rows.push(rowData);
+                                }
+                            });
+                            
+                            console.log(`Extracted ${rows.length} data rows`);
+                            return { headers, rows };
+                        }
+                    }
+                }
+                
+                return null;
+            }
+            
+            // Another approach - look specifically for dollar amounts and try to map them to targets
+            function findDollarTargetPairs() {
+                // Find all dollar amount elements (RPC values)
+                const dollarElements = Array.from(document.querySelectorAll('*'))
+                    .filter(el => {
+                        // Skip elements with children (container elements)
+                        if (el.children.length > 0) return false;
+                        
+                        const text = el.textContent.trim();
+                        // Match specifically dollar amount pattern
+                        return /\\$\\d+(\\.\\d+)?/.test(text) && !text.includes('Threshold');
+                    });
+                
+                console.log(`Found ${dollarElements.length} dollar amount elements`);
+                
+                // For each dollar amount, find the corresponding target in the same row
+                const rows = [];
+                
+                dollarElements.forEach(dollarEl => {
+                    const dollarRect = dollarEl.getBoundingClientRect();
+                    const dollarValue = dollarEl.textContent.trim();
+                    
+                    // Find elements that are in the same horizontal line (row)
+                    const sameRowElements = Array.from(document.querySelectorAll('*'))
+                        .filter(el => {
+                            // Skip containers
+                            if (el.children.length > 0) return false;
+                            // Skip empty text
+                            if (!el.textContent.trim()) return false;
+                            // Skip the dollar element itself
+                            if (el === dollarEl) return false;
+                            
+                            const rect = el.getBoundingClientRect();
+                            // Check if element is in the same horizontal line (row)
+                            return Math.abs(rect.top - dollarRect.top) < 10;
+                        });
+                    
+                    if (sameRowElements.length > 0) {
+                        // Sort by position (left to right)
+                        sameRowElements.sort((a, b) => 
+                            a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+                        
+                        // Create row data
+                        const rowData = {
+                            RPC: dollarValue
+                        };
+                        
+                        // Look for specific column types in the row
+                        const textContents = sameRowElements.map(el => el.textContent.trim());
+                        
+                        // Try to identify target, campaign, etc. by position and content
+                        // Usually the text to the left of the dollar amount
+                        const elementsToLeft = sameRowElements.filter(el => 
+                            el.getBoundingClientRect().left < dollarRect.left);
+                        
+                        if (elementsToLeft.length > 0) {
+                            // The rightmost element to the left is typically the target
+                            const targetElement = elementsToLeft[elementsToLeft.length - 1];
+                            rowData.Target = targetElement.textContent.trim();
+                            
+                            // If there are more elements to the left, the one before target might be campaign
+                            if (elementsToLeft.length > 1) {
+                                rowData.Campaign = elementsToLeft[0].textContent.trim();
+                            }
+                        }
+                        
+                        // Add row if we have meaningful data
+                        if (Object.keys(rowData).length >= 2) {
+                            rows.push(rowData);
+                        }
+                    }
+                });
+                
+                console.log(`Constructed ${rows.length} rows from dollar-target pairs`);
+                return {
+                    headers: ['Target', 'RPC', 'Campaign'],
+                    rows: rows
+                };
+            }
+            
+            // Yet another approach - scrape ALL text elements by position
+            function scrapeByPosition() {
+                // Get all leaf text nodes (elements with no children but with text)
+                const textElements = Array.from(document.querySelectorAll('*'))
+                    .filter(el => el.children.length === 0 && el.textContent.trim().length > 0);
+                
+                console.log(`Found ${textElements.length} text elements on page`);
+                
+                // Group elements by vertical position (to identify rows)
+                const rowGroups = {};
+                
+                textElements.forEach(el => {
+                    const rect = el.getBoundingClientRect();
+                    // Round to nearest 5px to group elements in the same row
+                    const rowKey = Math.round(rect.top / 5) * 5;
+                    
+                    if (!rowGroups[rowKey]) {
+                        rowGroups[rowKey] = [];
+                    }
+                    
+                    rowGroups[rowKey].push({
+                        element: el,
+                        text: el.textContent.trim(),
+                        left: rect.left
+                    });
+                });
+                
+                // Sort each row by horizontal position
+                const sortedRows = [];
+                
+                Object.keys(rowGroups).forEach(rowKey => {
+                    // Sort by left position
+                    const elements = rowGroups[rowKey].sort((a, b) => a.left - b.left);
+                    sortedRows.push({
+                        top: parseInt(rowKey),
+                        elements: elements
+                    });
+                });
+                
+                // Sort rows by vertical position
+                sortedRows.sort((a, b) => a.top - b.top);
+                
+                // Try to identify which row contains headers
+                let headerRowIndex = -1;
+                
+                for (let i = 0; i < sortedRows.length; i++) {
+                    const rowTexts = sortedRows[i].elements.map(el => el.text.toLowerCase());
+                    
+                    // Check if this row contains common header names
+                    const hasTarget = rowTexts.some(text => text === 'target');
+                    const hasRPC = rowTexts.some(text => text === 'rpc');
+                    const hasCampaign = rowTexts.some(text => text === 'campaign');
+                    
+                    if ((hasTarget && hasRPC) || (hasTarget && hasCampaign) || (hasRPC && hasCampaign)) {
+                        headerRowIndex = i;
+                        break;
+                    }
+                }
+                
+                // If we found a header row, get headers and data rows
+                if (headerRowIndex >= 0) {
+                    const headerRow = sortedRows[headerRowIndex];
+                    const headers = headerRow.elements.map(el => el.text);
+                    
+                    console.log('Found headers by position:', headers);
+                    
+                    // Use rows below the header as data rows
+                    const rows = [];
+                    
+                    for (let i = headerRowIndex + 1; i < sortedRows.length; i++) {
+                        const row = sortedRows[i];
+                        const rowData = {};
+                        
+                        // Skip if this row is too far from the header (likely unrelated content)
+                        if (row.top - headerRow.top > 500) break;
+                        
+                        // Map cells to headers
+                        for (let j = 0; j < Math.min(row.elements.length, headers.length); j++) {
+                            rowData[headers[j]] = row.elements[j].text;
+                        }
+                        
+                        // Check if this looks like a data row (has target or RPC)
+                        if ('Target' in rowData || 'RPC' in rowData) {
+                            rows.push(rowData);
+                        }
+                    }
+                    
+                    console.log(`Extracted ${rows.length} rows by position`);
+                    return { headers, rows };
+                }
+                
+                return null;
+            }
+            
+            // Try each approach in sequence
+            let result = extractRingbaUI();
+            
+            if (!result || !result.rows || result.rows.length === 0) {
+                console.log('First approach failed, trying dollar-target pairs...');
+                result = findDollarTargetPairs();
+            }
+            
+            if (!result || !result.rows || result.rows.length === 0) {
+                console.log('Second approach failed, trying position-based extraction...');
+                result = scrapeByPosition();
+            }
+            
+            return result || { headers: [], rows: [] };
+        """)
+        
+        # Check if we got data from the Ringba UI structure extraction
+        if ringba_structure_data and 'rows' in ringba_structure_data and ringba_structure_data['rows']:
+            logger.info(f"Successfully extracted {len(ringba_structure_data['rows'])} rows from Ringba UI structure")
+            
+            # Log the headers we found
+            if 'headers' in ringba_structure_data:
+                logger.info(f"Extracted headers: {ringba_structure_data['headers']}")
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(ringba_structure_data['rows'])
+            
+            # Save to CSV file
+            file_path = os.path.join("/tmp", f"ringba_ui_extract_{int(time.time())}.csv")
+            df.to_csv(file_path, index=False)
+            
+            logger.info(f"Saved Ringba UI structure data to {file_path}")
+            return file_path
         
         # NEW ENHANCED VERSION: Directly extract from the table visible in the screenshot
         logger.info("Extracting data directly from the visible Ringba summary table...")
@@ -2210,12 +2665,82 @@ if __name__ == "__main__":
         logger.info("Test run complete, service will now wait for scheduled runs")
         
         # Start Flask app for web service
-        from flask import Flask
+        from flask import Flask, send_from_directory, render_template_string
+        import glob
         app = Flask(__name__)
         
         @app.route('/')
         def home():
             return "Ringba Export Service is running. Scheduled runs at 11 AM, 2 PM, and 4:30 PM ET."
+        
+        @app.route('/screenshots')
+        def list_screenshots():
+            """List all screenshots with links to view them"""
+            screenshots = []
+            for file_path in glob.glob(f"{screenshots_dir}/*.png"):
+                file_name = os.path.basename(file_path)
+                screenshots.append({
+                    'name': file_name,
+                    'path': f'/screenshots/{file_name}',
+                    'timestamp': os.path.getmtime(file_path)
+                })
+            
+            # Sort by timestamp (newest first)
+            screenshots.sort(key=lambda x: x['timestamp'], reverse=True)
+            
+            # Generate HTML to display the screenshots
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Ringba Screenshots</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; }
+                    h1 { color: #333; }
+                    .screenshot-list { display: flex; flex-wrap: wrap; }
+                    .screenshot-item { 
+                        margin: 10px; 
+                        padding: 10px; 
+                        border: 1px solid #ddd; 
+                        border-radius: 5px;
+                        width: 300px;
+                    }
+                    img { max-width: 100%; }
+                    .timestamp { color: #666; font-size: 12px; }
+                </style>
+            </head>
+            <body>
+                <h1>Ringba Screenshots</h1>
+                <div class="screenshot-list">
+                    {% for screenshot in screenshots %}
+                    <div class="screenshot-item">
+                        <h3>{{ screenshot.name }}</h3>
+                        <div class="timestamp">{{ screenshot.timestamp|datetime }}</div>
+                        <a href="{{ screenshot.path }}" target="_blank">
+                            <img src="{{ screenshot.path }}" alt="{{ screenshot.name }}">
+                        </a>
+                    </div>
+                    {% endfor %}
+                </div>
+            </body>
+            </html>
+            """
+            
+            # Add datetime filter for timestamp formatting
+            from datetime import datetime
+            def datetime_filter(timestamp):
+                return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            
+            return render_template_string(
+                html, 
+                screenshots=screenshots,
+                datetime=datetime_filter
+            )
+        
+        @app.route('/screenshots/<filename>')
+        def get_screenshot(filename):
+            """Serve a specific screenshot file"""
+            return send_from_directory(screenshots_dir, filename)
         
         # Get port from environment variable
         port = int(os.getenv('PORT', 8080))
