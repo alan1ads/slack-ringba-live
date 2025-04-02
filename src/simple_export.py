@@ -407,9 +407,9 @@ def set_date_range(browser, start_date, end_date):
     return True
 
 def click_export_csv(browser):
-    """Click the Export CSV button and wait for the download to complete"""
+    """Directly scrape the table data from the page instead of exporting CSV"""
     try:
-        # Navigate directly to the summary page with export option
+        # Navigate directly to the summary page
         logger.info("Navigating directly to call summary report...")
         try:
             browser.get("https://app.ringba.com/#/dashboard/call-logs/report/summary")
@@ -420,600 +420,632 @@ def click_export_csv(browser):
             take_screenshot(browser, "navigation_failed")
         
         # Take screenshot to see page state
-        take_screenshot(browser, "before_export_attempt")
+        take_screenshot(browser, "before_table_extraction")
         
-        # SKIP TABLE EXTRACTION - Focus ONLY on clicking the Export CSV button
-        logger.info("Setting up enhanced blob URL interception...")
-        browser.execute_script("""
-            // Store blob URLs and download data
-            window.blobUrls = [];
-            window.downloadData = null;
-            window.csvContent = null;
+        # NEW ENHANCED VERSION: Directly extract from the table visible in the screenshot
+        logger.info("Extracting data directly from the visible Ringba summary table...")
+        table_data = browser.execute_script("""
+            console.log('Starting enhanced Ringba table extraction...');
             
-            // Debug logging helper
-            function logDownloadInfo(message) {
-                console.log('[Download Debug] ' + message);
-                // Also store in a global array for access from Selenium
-                if (!window.downloadLogs) window.downloadLogs = [];
-                window.downloadLogs.push({
-                    time: new Date().toISOString(),
-                    message: message
-                });
-            }
-            
-            logDownloadInfo('Setting up blob interception');
-            
-            // Track all blobs
-            const originalCreateObjectURL = URL.createObjectURL;
-            URL.createObjectURL = function(object) {
-                const url = originalCreateObjectURL(object);
-                logDownloadInfo('Blob URL created: ' + url + ' (type: ' + (object.type || 'unknown') + ', size: ' + object.size + ')');
+            // APPROACH 1: Target the specific summary table at the bottom of the page
+            function extractRingbaSummaryTable() {
+                console.log('Attempting to extract from Ringba summary table');
                 
-                // Store the blob and URL
-                window.blobUrls.push({
-                    url: url,
-                    blob: object,
-                    timestamp: Date.now()
+                // First look for the table headers we can see in the screenshot
+                // Based on the visible headers in the screenshot: Campaign, Publisher, Target, Buyer, etc.
+                const TARGET_COLUMNS = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 'Number Pool', 
+                                      'Date', 'Duplicate', 'Tags', 'RPC', 'Revenue', 'Payout'];
+                
+                // Check if we can find the header row
+                const headerElements = Array.from(document.querySelectorAll('th, [role="columnheader"]'));
+                console.log(`Found ${headerElements.length} potential header elements`);
+                
+                // Find header elements that match our target columns
+                const foundHeaders = headerElements.filter(el => {
+                    const text = el.textContent.trim().replace(/▼|▲|↓|↑/g, '').trim().toLowerCase();
+                    return TARGET_COLUMNS.some(col => col.toLowerCase() === text);
                 });
                 
-                // If it's a CSV, try to read it
-                if (object instanceof Blob && 
-                    (object.type === 'text/csv' || 
-                     object.type === 'application/csv' || 
-                     object.type === 'application/vnd.ms-excel' ||
-                     object.type === '')) {
+                console.log(`Found ${foundHeaders.length} matching header elements`);
+                
+                if (foundHeaders.length > 0) {
+                    // Find the table containing these headers
+                    const tableElement = foundHeaders[0].closest('table, [role="grid"], [role="table"]');
                     
-                    logDownloadInfo('Found potential CSV blob: ' + object.type + ', ' + object.size);
-                    
-                    // Read the blob
-                    const reader = new FileReader();
-                    reader.onload = function() {
-                        const content = reader.result;
-                        logDownloadInfo('Read blob content, length: ' + content.length);
+                    if (tableElement) {
+                        console.log('Found table containing target headers');
                         
-                        // Simple CSV check - look for commas and newlines
-                        if (content.includes(',') && 
-                            (content.includes('\\n') || content.includes('\\r'))) {
-                            
-                            window.csvContent = content;
-                            logDownloadInfo('Saved CSV content from blob of size: ' + content.length);
-                            
-                            // Store download data in format expected by the Python code
-                            window.downloadData = {
-                                content: content,
-                                timestamp: Date.now(),
-                                type: object.type || 'text/csv'
-                            };
-                        }
-                    };
-                    reader.readAsText(object);
-                }
-                
-                return url;
-            };
-            
-            // Monitor all XMLHttpRequests to catch CSV responses
-            const originalXhrOpen = XMLHttpRequest.prototype.open;
-            const originalXhrSend = XMLHttpRequest.prototype.send;
-            
-            XMLHttpRequest.prototype.open = function(method, url) {
-                this._method = method;
-                this._url = url;
-                
-                // Check if this might be related to a download or export
-                if (typeof url === 'string' && (
-                    url.includes('export') || 
-                    url.includes('download') ||
-                    url.includes('csv') ||
-                    url.includes('call-logs')
-                )) {
-                    logDownloadInfo('Monitoring XHR: ' + method + ' ' + url);
-                    this._isMonitored = true;
-                }
-                
-                return originalXhrOpen.apply(this, arguments);
-            };
-            
-            XMLHttpRequest.prototype.send = function() {
-                if (this._isMonitored) {
-                    const xhr = this;
-                    
-                    // Store the original onreadystatechange
-                    const originalOnReadyStateChange = xhr.onreadystatechange;
-                    
-                    xhr.onreadystatechange = function() {
-                        if (xhr.readyState === 4) {
-                            // Request completed
-                            if (xhr.status >= 200 && xhr.status < 300) {
-                                // Success
-                                logDownloadInfo('XHR completed: ' + xhr._url);
-                                
-                                // Check if response looks like CSV
-                                const contentType = xhr.getResponseHeader('Content-Type');
-                                if (contentType && (
-                                    contentType.includes('csv') || 
-                                    contentType.includes('text/plain') ||
-                                    contentType.includes('octet-stream')
-                                )) {
-                                    logDownloadInfo('Found CSV response in XHR: ' + contentType);
-                                    
-                                    // Save the CSV content
-                                    window.csvContent = xhr.responseText;
-                                    window.downloadData = {
-                                        content: xhr.responseText,
-                                        timestamp: Date.now(),
-                                        type: contentType
-                                    };
-                                }
-                                else if (xhr._url.includes('call-logs')) {
-                                    logDownloadInfo('Found call logs response, checking content');
-                                    
-                                    // Try to detect if content is CSV
-                                    try {
-                                        const text = xhr.responseText;
-                                        if (text && text.includes(',') && 
-                                            (text.includes('\\n') || text.includes('\\r'))) {
-                                            
-                                            logDownloadInfo('Content appears to be CSV, length: ' + text.length);
-                                            window.csvContent = text;
-                                            window.downloadData = {
-                                                content: text,
-                                                timestamp: Date.now(),
-                                                type: 'text/csv'
-                                            };
-                                        }
-                                    } catch (e) {
-                                        logDownloadInfo('Error checking XHR content: ' + e);
-                                    }
-                                }
-                            }
-                        }
+                        // Extract the header texts
+                        const headerRow = tableElement.querySelector('thead tr, [role="row"]') || 
+                                          tableElement.querySelector('tr:first-child');
                         
-                        // Call the original onreadystatechange
-                        if (originalOnReadyStateChange) {
-                            originalOnReadyStateChange.apply(xhr, arguments);
-                        }
-                    };
-                }
-                
-                return originalXhrSend.apply(this, arguments);
-            };
-            
-            // Monitor all fetch requests too
-            const originalFetch = window.fetch;
-            window.fetch = function(input, init) {
-                // Determine URL
-                const url = (typeof input === 'string') ? input : input.url;
-                
-                if (url && (
-                    url.includes('export') || 
-                    url.includes('download') ||
-                    url.includes('csv') ||
-                    url.includes('call-logs')
-                )) {
-                    logDownloadInfo('Monitoring fetch: ' + url);
-                    
-                    // Return a Promise that wraps the original fetch
-                    return originalFetch.apply(this, arguments)
-                        .then(response => {
-                            // Clone the response so we can read it twice
-                            const clone = response.clone();
+                        const headerCells = headerRow ? 
+                            headerRow.querySelectorAll('th, [role="columnheader"]') : 
+                            foundHeaders;
+                        
+                        const headers = Array.from(headerCells).map(cell => 
+                            cell.textContent.trim().replace(/▼|▲|↓|↑/g, '').trim());
+                        
+                        console.log('Extracted headers:', headers);
+                        
+                        // Find all data rows
+                        const dataRows = tableElement.querySelectorAll('tbody tr, [role="row"]:not([role="columnheader"])');
+                        console.log(`Found ${dataRows.length} data rows`);
+                        
+                        // Extract data from rows
+                        const rows = [];
+                        dataRows.forEach(row => {
+                            // Skip header rows
+                            if (row.querySelector('th') || row.closest('thead')) return;
                             
-                            // Check content type
-                            const contentType = clone.headers.get('Content-Type');
-                            if (contentType && (
-                                contentType.includes('csv') || 
-                                contentType.includes('text/plain') ||
-                                contentType.includes('octet-stream')
-                            )) {
-                                logDownloadInfo('Found CSV in fetch response: ' + contentType);
-                                
-                                // Read and store the content
-                                clone.text().then(text => {
-                                    window.csvContent = text;
-                                    window.downloadData = {
-                                        content: text,
-                                        timestamp: Date.now(),
-                                        type: contentType
-                                    };
-                                });
+                            const cells = row.querySelectorAll('td, [role="cell"]');
+                            if (cells.length === 0) return;
+                            
+                            const rowData = {};
+                            for (let i = 0; i < Math.min(cells.length, headers.length); i++) {
+                                rowData[headers[i]] = cells[i].textContent.trim();
                             }
                             
-                            // Return the original response
-                            return response;
+                            // Only include rows with meaningful data (not empty, not header repeats)
+                            const hasData = Object.values(rowData).some(val => 
+                                val && !headers.includes(val) && val !== 'Target' && val !== 'RPC');
+                                
+                            if (hasData) {
+                                rows.push(rowData);
+                            }
                         });
+                        
+                        console.log(`Extracted ${rows.length} data rows with content`);
+                        return { headers, rows };
+                    }
                 }
                 
-                // Not a monitored URL, just pass through
-                return originalFetch.apply(this, arguments);
-            };
-        """)
-        
-        # Find all possible download directories - ONLY USE WRITABLE DIRECTORIES
-        download_dir = "/tmp"
-        possible_download_dirs = [
-            "/tmp", 
-            "/tmp/downloads",
-            "/opt/render/downloads",
-            "/opt/render/project/src/downloads",
-            "/opt/render/tmp"
-        ]
-        
-        # Filter out empty paths and ensure directories exist
-        possible_download_dirs = [d for d in possible_download_dirs if d and d != '/downloads']
-        for d in possible_download_dirs:
-            try:
-                os.makedirs(d, exist_ok=True)
-                logger.info(f"Created/verified directory: {d}")
-            except Exception as e:
-                logger.warning(f"Could not create directory {d}: {e}")
-                # Remove from list if we can't create it
-                if d in possible_download_dirs:
-                    possible_download_dirs.remove(d)
-            
-        logger.info(f"Checking for downloads in these directories: {possible_download_dirs}")
-        
-        # Check all existing CSV files before download attempt
-        existing_csv_files = {}
-        for d in possible_download_dirs:
-            try:
-                csv_files = [f for f in os.listdir(d) if f.endswith('.csv')]
-                for f in csv_files:
-                    full_path = os.path.join(d, f)
-                    existing_csv_files[full_path] = os.path.getmtime(full_path)
-                logger.info(f"Found {len(csv_files)} existing CSV files in {d}")
-            except Exception as e:
-                logger.warning(f"Error checking directory {d}: {str(e)}")
-        
-        # FOCUS ON EXPORT BUTTON - Find and try to click it
-        logger.info("Looking for EXPORT CSV button...")
-        
-        # Check if the button exists but might be disabled
-        button_info = browser.execute_script("""
-            // First look for button with "EXPORT CSV" text
-            const buttons = Array.from(document.querySelectorAll('button'))
-                .filter(el => el.textContent.trim().includes('EXPORT CSV') || 
-                             el.textContent.trim().includes('Export CSV'));
-                
-            // Also check for export buttons by class name
-            const exportButtons = Array.from(document.querySelectorAll('button.export-summary-btn, button[class*="export"]'))
-                .filter(el => el.textContent.toLowerCase().includes('export'));
-                
-            const allButtons = [...buttons, ...exportButtons];
-            
-            // Check if we found any buttons
-            if (allButtons.length === 0) {
-                return {status: 'not_found', message: 'No export buttons found'};
+                return null;
             }
             
-            // Check if any buttons are enabled
-            const enabledButtons = allButtons.filter(el => !el.disabled && !el.hasAttribute('disabled'));
-            if (enabledButtons.length > 0) {
-                // Click the first enabled button
-                enabledButtons[0].click();
-                return {
-                    status: 'clicked',
-                    message: 'Clicked enabled button', 
-                    html: enabledButtons[0].outerHTML
-                };
-            } else {
-                // Return info about disabled button
-                return {
-                    status: 'disabled',
-                    message: 'Button found but disabled',
-                    html: allButtons[0].outerHTML
+            // APPROACH 2: Target the specific section visible in the screenshot (Summary section)
+            function extractFromSummarySection() {
+                console.log('Looking for Summary section...');
+                
+                // Look for the Summary heading or section
+                const summarySection = document.querySelector('.summary, #summary, [data-test="summary"]');
+                const summaryHeading = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+                    .find(el => el.textContent.trim() === 'Summary');
+                
+                const summaryContext = summarySection || 
+                                      (summaryHeading && summaryHeading.parentElement) || 
+                                      document.querySelector('[id*="summary"], [class*="summary"]');
+                
+                if (summaryContext) {
+                    console.log('Found Summary section, looking for table within it');
+                    
+                    // Find table inside summary section
+                    const tableElement = summaryContext.querySelector('table, [role="grid"], [role="table"]');
+                    
+                    if (tableElement) {
+                        console.log('Found table in Summary section');
+                        
+                        // Extract headers
+                        const headers = [];
+                        const headerElements = tableElement.querySelectorAll('th, [role="columnheader"]');
+                        
+                        headerElements.forEach(el => {
+                            headers.push(el.textContent.trim().replace(/▼|▲|↓|↑/g, '').trim());
+                        });
+                        
+                        console.log('Found headers:', headers);
+                        
+                        // Extract data rows
+                        const rows = [];
+                        const dataRows = tableElement.querySelectorAll('tbody tr, [role="row"]:not([role="columnheader"])');
+                        
+                        dataRows.forEach(row => {
+                            const cells = row.querySelectorAll('td, [role="cell"]');
+                            if (cells.length === 0) return;
+                            
+                            const rowData = {};
+                            for (let i = 0; i < Math.min(cells.length, headers.length); i++) {
+                                rowData[headers[i]] = cells[i].textContent.trim();
+                            }
+                            
+                            rows.push(rowData);
+                        });
+                        
+                        console.log(`Extracted ${rows.length} rows from Summary section table`);
+                        return { headers, rows };
+                    }
+                }
+                
+                return null;
+            }
+            
+            // APPROACH 3: Search for any table containing the key columns (Target, RPC)
+            function findTableWithTargetAndRPC() {
+                console.log('Searching for any table with Target and RPC columns...');
+                
+                const tables = document.querySelectorAll('table, [role="grid"], [role="table"]');
+                console.log(`Found ${tables.length} potential tables on page`);
+                
+                // Process each table
+                for (const table of tables) {
+                    // Get header elements
+                    const headerElements = table.querySelectorAll('th, [role="columnheader"]');
+                    if (headerElements.length === 0) continue;
+                    
+                    // Extract header texts
+                    const headers = Array.from(headerElements).map(el => 
+                        el.textContent.trim().replace(/▼|▲|↓|↑/g, '').trim());
+                    
+                    // Check if this table has both Target and RPC columns
+                    const hasTarget = headers.some(h => h === 'Target' || h === 'target');
+                    const hasRPC = headers.some(h => h === 'RPC' || h === 'rpc' || h.includes('Revenue'));
+                    
+                    if (hasTarget && hasRPC) {
+                        console.log('Found table with both Target and RPC columns');
+                        
+                        // Extract data rows
+                        const rows = [];
+                        const dataRows = table.querySelectorAll('tbody tr, [role="row"]:not([role="columnheader"])');
+                        
+                        dataRows.forEach(row => {
+                            const cells = row.querySelectorAll('td, [role="cell"]');
+                            if (cells.length === 0) return;
+                            
+                            const rowData = {};
+                            for (let i = 0; i < Math.min(cells.length, headers.length); i++) {
+                                rowData[headers[i]] = cells[i].textContent.trim();
+                            }
+                            
+                            rows.push(rowData);
+                        });
+                        
+                        console.log(`Extracted ${rows.length} rows from table with Target and RPC`);
+                        return { headers, rows };
+                    }
+                }
+                
+                return null;
+            }
+            
+            // APPROACH 4: Position-based extraction for complex Angular/React tables
+            function extractByPosition() {
+                console.log('Attempting position-based extraction for complex tables...');
+                
+                // First try to find the Target and RPC column headers
+                const columnHeaders = Array.from(document.querySelectorAll('div, span, th, [role="columnheader"]'))
+                    .filter(el => {
+                        const text = el.textContent.trim().toLowerCase();
+                        return text === 'target' || text === 'rpc' || text === 'campaign' || 
+                               text === 'revenue' || text === 'publisher';
+                    });
+                
+                if (columnHeaders.length >= 2) {
+                    console.log(`Found ${columnHeaders.length} column headers including Target/RPC`);
+                    
+                    // Get the positions of these headers
+                    const headerPositions = columnHeaders.map(el => {
+                        const rect = el.getBoundingClientRect();
+                        return {
+                            element: el,
+                            text: el.textContent.trim(),
+                            x: rect.left,
+                            y: rect.top,
+                            width: rect.width,
+                            bottom: rect.bottom
+                        };
+                    });
+                    
+                    // Sort headers by Y position to group headers in the same row
+                    const headersByRow = {};
+                    headerPositions.forEach(pos => {
+                        // Round Y position to group headers in the same row
+                        const rowY = Math.round(pos.y / 5) * 5;
+                        if (!headersByRow[rowY]) {
+                            headersByRow[rowY] = [];
+                        }
+                        headersByRow[rowY].push(pos);
+                    });
+                    
+                    // Use the row with the most column headers
+                    let bestHeaderRow = null;
+                    let maxHeaders = 0;
+                    
+                    Object.entries(headersByRow).forEach(([rowY, headers]) => {
+                        if (headers.length > maxHeaders) {
+                            maxHeaders = headers.length;
+                            bestHeaderRow = headers;
+                        }
+                    });
+                    
+                    if (bestHeaderRow) {
+                        // Sort headers by X position (left to right)
+                        bestHeaderRow.sort((a, b) => a.x - b.x);
+                        
+                        // Extract header names
+                        const headers = bestHeaderRow.map(h => h.text);
+                        console.log('Found headers by position:', headers);
+                        
+                        // Get the Y position below the header row where data starts
+                        const dataStartY = Math.max(...bestHeaderRow.map(h => h.bottom)) + 5;
+                        
+                        // Find all text elements that could be cell data
+                        const allCellTexts = Array.from(document.querySelectorAll('div, span'))
+                            .filter(el => {
+                                // Skip elements with children (containers)
+                                if (el.children.length > 0) return false;
+                                
+                                // Must have text content
+                                if (!el.textContent.trim()) return false;
+                                
+                                // Get position
+                                const rect = el.getBoundingClientRect();
+                                
+                                // Must be below the headers
+                                return rect.top >= dataStartY;
+                            })
+                            .map(el => {
+                                const rect = el.getBoundingClientRect();
+                                return {
+                                    element: el,
+                                    text: el.textContent.trim(),
+                                    x: rect.left,
+                                    y: rect.top
+                                };
+                            });
+                        
+                        // Group cells by row position
+                        const cellsByRow = {};
+                        allCellTexts.forEach(cell => {
+                            // Round Y position to group cells in the same row
+                            const rowY = Math.round(cell.y / 5) * 5;
+                            if (!cellsByRow[rowY]) {
+                                cellsByRow[rowY] = [];
+                            }
+                            cellsByRow[rowY].push(cell);
+                        });
+                        
+                        // Process each row to create data records
+                        const rows = [];
+                        Object.entries(cellsByRow).forEach(([rowY, cells]) => {
+                            // Skip if this might be the header row
+                            if (Math.abs(parseInt(rowY) - Math.round(bestHeaderRow[0].y / 5) * 5) < 10) {
+                                return;
+                            }
+                            
+                            // Sort cells by X position
+                            cells.sort((a, b) => a.x - b.x);
+                            
+                            // Map cells to headers based on X position
+                            const rowData = {};
+                            bestHeaderRow.forEach((header, index) => {
+                                // Find the cell that best matches this header's X position
+                                const nearestCells = cells.filter(cell => 
+                                    Math.abs(cell.x - header.x) < header.width * 0.8);
+                                
+                                if (nearestCells.length > 0) {
+                                    // Use the nearest cell by X position
+                                    nearestCells.sort((a, b) => 
+                                        Math.abs(a.x - header.x) - Math.abs(b.x - header.x));
+                                    
+                                    rowData[header.text] = nearestCells[0].text;
+                                }
+                            });
+                            
+                            // Only include rows with reasonable data
+                            if (Object.keys(rowData).length >= 2) {
+                                rows.push(rowData);
+                            }
+                        });
+                        
+                        console.log(`Extracted ${rows.length} rows using position-based approach`);
+                        return { headers, rows };
+                    }
+                }
+                
+                return null;
+            }
+            
+            // APPROACH 5: Direct DOM scraping for dollar values and labels
+            function extractDollarValuesAndLabels() {
+                console.log('Extracting dollar values and their labels directly...');
+                
+                // Find all elements with $ sign that might be RPC values
+                const dollarElements = Array.from(document.querySelectorAll('*'))
+                    .filter(el => {
+                        // Skip containers
+                        if (el.children.length > 0) return false;
+                        
+                        const text = el.textContent.trim();
+                        // Must start with $ and look like a currency value
+                        return text.startsWith('$') && /\\$\\d+(\\.\\d+)?/.test(text);
+                    });
+                
+                console.log(`Found ${dollarElements.length} dollar value elements`);
+                
+                // Find the nearest label for each dollar value
+                const results = [];
+                dollarElements.forEach(dollarEl => {
+                    const dollarRect = dollarEl.getBoundingClientRect();
+                    const dollarValue = dollarEl.textContent.trim();
+                    
+                    // Find all elements that could be labels
+                    const potentialLabels = Array.from(document.querySelectorAll('*'))
+                        .filter(el => {
+                            // Skip containers
+                            if (el.children.length > 0) return false;
+                            
+                            // Skip dollars
+                            if (el.textContent.trim().startsWith('$')) return false;
+                            
+                            // Must have text content
+                            const text = el.textContent.trim();
+                            if (!text || text.length < 2) return false;
+                            
+                            // Position relative to dollar value
+                            const rect = el.getBoundingClientRect();
+                            
+                            // Either same row (to the left) or row above
+                            const sameRow = Math.abs(rect.top - dollarRect.top) < 10 && rect.left < dollarRect.left;
+                            const rowAbove = dollarRect.top - rect.bottom < 30 && dollarRect.top - rect.bottom > 5 &&
+                                          Math.abs(rect.left - dollarRect.left) < 50;
+                            
+                            return sameRow || rowAbove;
+                        });
+                    
+                    if (potentialLabels.length > 0) {
+                        // Sort by distance (prefer same row, then closest)
+                        potentialLabels.sort((a, b) => {
+                            const aRect = a.getBoundingClientRect();
+                            const bRect = b.getBoundingClientRect();
+                            
+                            // Same row has priority
+                            const aOnSameRow = Math.abs(aRect.top - dollarRect.top) < 10;
+                            const bOnSameRow = Math.abs(bRect.top - dollarRect.top) < 10;
+                            
+                            if (aOnSameRow && !bOnSameRow) return -1;
+                            if (!aOnSameRow && bOnSameRow) return 1;
+                            
+                            // Both on same row - compare horizontal distance
+                            if (aOnSameRow && bOnSameRow) {
+                                return (dollarRect.left - aRect.right) - (dollarRect.left - bRect.right);
+                            }
+                            
+                            // Both on different rows - compare vertical then horizontal distance
+                            const aVertDist = dollarRect.top - aRect.bottom;
+                            const bVertDist = dollarRect.top - bRect.bottom;
+                            
+                            if (Math.abs(aVertDist - bVertDist) > 10) {
+                                return aVertDist - bVertDist;
+                            }
+                            
+                            return Math.abs(aRect.left - dollarRect.left) - Math.abs(bRect.left - dollarRect.left);
+                        });
+                        
+                        const bestLabel = potentialLabels[0];
+                        results.push({
+                            Target: bestLabel.textContent.trim(),
+                            RPC: dollarValue
+                        });
+                    }
+                });
+                
+                console.log(`Constructed ${results.length} Target/RPC pairs`);
+                return { 
+                    headers: ['Target', 'RPC'],
+                    rows: results 
                 };
             }
-        """)
-        
-        # Log button information
-        if isinstance(button_info, dict):
-            logger.info(f"Button status: {button_info.get('status')} - {button_info.get('message')}")
-            if 'html' in button_info:
-                logger.info(f"Button HTML: {button_info.get('html')}")
+            
+            // Try each approach in order
+            let result = extractRingbaSummaryTable();
+            
+            if (!result || !result.rows || result.rows.length === 0) {
+                console.log('First approach failed, trying Summary section approach...');
+                result = extractFromSummarySection();
+            }
+            
+            if (!result || !result.rows || result.rows.length === 0) {
+                console.log('Second approach failed, searching for Target/RPC table...');
+                result = findTableWithTargetAndRPC();
+            }
+            
+            if (!result || !result.rows || result.rows.length === 0) {
+                console.log('Third approach failed, trying position-based extraction...');
+                result = extractByPosition();
+            }
+            
+            if (!result || !result.rows || result.rows.length === 0) {
+                console.log('Fourth approach failed, extracting dollar values directly...');
+                result = extractDollarValuesAndLabels();
+            }
+            
+            // Extract relevant columns only (Target and RPC)
+            if (result && result.rows && result.rows.length > 0) {
+                // Check which columns are available
+                const sampleRow = result.rows[0];
                 
-            # Check if button is disabled
-            if button_info.get('status') == 'disabled':
-                logger.warning("Export button is disabled - waiting to see if it becomes enabled")
+                let targetColumn = null;
+                let rpcColumn = null;
                 
-                # Wait up to 45 seconds for button to become enabled
-                wait_time = 45
-                start_wait = time.time()
-                button_enabled = False
+                // Find Target column
+                if ('Target' in sampleRow) targetColumn = 'Target';
+                else if ('target' in sampleRow) targetColumn = 'target';
+                else {
+                    // Look for columns containing "target" (case insensitive)
+                    for (const col in sampleRow) {
+                        if (col.toLowerCase().includes('target')) {
+                            targetColumn = col;
+                            break;
+                        }
+                    }
+                }
                 
-                # Take screenshot of disabled button state
-                take_screenshot(browser, "disabled_export_button")
-                
-                # Try to identify why button might be disabled
-                status_info = browser.execute_script("""
-                    // Check for loading indicators
-                    const loadingElements = document.querySelectorAll('.loading, .spinner, [class*="loading"]');
+                // Find RPC column
+                if ('RPC' in sampleRow) rpcColumn = 'RPC';
+                else if ('rpc' in sampleRow) rpcColumn = 'rpc';
+                else {
+                    // Look for columns with $ values
+                    for (const col in sampleRow) {
+                        if (typeof sampleRow[col] === 'string' && sampleRow[col].includes('$')) {
+                            rpcColumn = col;
+                            break;
+                        }
+                    }
                     
-                    // Check for status messages
-                    const statusMessages = document.querySelectorAll('.status, .message, .notification');
+                    // Look for columns containing "rpc" or "revenue" (case insensitive)
+                    if (!rpcColumn) {
+                        for (const col in sampleRow) {
+                            if (col.toLowerCase().includes('rpc') || col.toLowerCase().includes('revenue')) {
+                                rpcColumn = col;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // If we found both columns, extract only those
+                if (targetColumn && rpcColumn) {
+                    console.log(`Extracting from columns: Target=${targetColumn}, RPC=${rpcColumn}`);
                     
-                    // Check for error messages
-                    const errorMessages = document.querySelectorAll('.error, .alert');
+                    const simplifiedRows = result.rows.map(row => ({
+                        Target: row[targetColumn],
+                        RPC: row[rpcColumn]
+                    }));
                     
                     return {
-                        loading: loadingElements.length > 0,
-                        status: Array.from(statusMessages).map(el => el.textContent.trim()),
-                        errors: Array.from(errorMessages).map(el => el.textContent.trim())
+                        headers: ['Target', 'RPC'],
+                        rows: simplifiedRows
                     };
-                """)
+                }
+            }
+            
+            return result || { headers: [], rows: [] };
+        """)
+        
+        # Check if we got data from the scraping
+        if table_data and 'rows' in table_data and table_data['rows']:
+            logger.info(f"Successfully extracted {len(table_data['rows'])} rows directly from page")
+            
+            # Log the headers we found
+            if 'headers' in table_data:
+                logger.info(f"Extracted headers: {table_data['headers']}")
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(table_data['rows'])
+            
+            # Save to CSV file
+            file_path = os.path.join("/tmp", f"table_extract_{int(time.time())}.csv")
+            df.to_csv(file_path, index=False)
+            
+            logger.info(f"Saved extracted table data to {file_path}")
+            return file_path
+        else:
+            # Take a screenshot to see what's on the page
+            take_screenshot(browser, "table_extraction_failed")
+            logger.warning("No data found in tables on the page")
+            
+            # Last resort: Try to scrape any text that looks like Target and RPC data
+            logger.info("Trying last resort extraction of any Target/RPC-like data...")
+            
+            target_rpc_data = browser.execute_script("""
+                // Find all elements that might contain RPC values (dollar amounts)
+                const dollarElements = Array.from(document.querySelectorAll('*'))
+                    .filter(el => {
+                        if (el.children.length > 0) return false;
+                        const text = el.textContent.trim();
+                        return text.includes('$') && text.length < 20;
+                    });
                 
-                if isinstance(status_info, dict):
-                    if status_info.get('loading'):
-                        logger.info("Page appears to be loading - waiting for it to complete")
-                    if status_info.get('status'):
-                        logger.info(f"Status messages found: {status_info.get('status')}")
-                    if status_info.get('errors'):
-                        logger.warning(f"Error messages found: {status_info.get('errors')}")
+                console.log(`Found ${dollarElements.length} potential dollar amount elements`);
                 
-                # Try clicking the date picker or refresh button to load data
-                browser.execute_script("""
-                    // Try clicking date picker to load data
-                    const datePickers = document.querySelectorAll('.date-picker, [class*="date"], [id*="date"]');
-                    if (datePickers.length > 0) {
-                        console.log('Clicking date picker to load data');
-                        datePickers[0].click();
-                        
-                        // Now click "Today" or "Apply" if available
-                        setTimeout(() => {
-                            const applyButtons = document.querySelectorAll('button:contains("Apply"), button:contains("Today")');
-                            if (applyButtons.length > 0) {
-                                console.log('Clicking Apply/Today button');
-                                applyButtons[0].click();
-                            }
-                        }, 1000);
-                    }
+                // Function to find nearest text element that could be a target name
+                function findNearestText(element) {
+                    const rect = element.getBoundingClientRect();
                     
-                    // Try clicking refresh button
-                    const refreshButtons = document.querySelectorAll('button:contains("Refresh"), [class*="refresh"]');
-                    if (refreshButtons.length > 0) {
-                        console.log('Clicking refresh button');
-                        refreshButtons[0].click();
-                    }
-                """)
-                
-                # Wait and check if button becomes enabled
-                while time.time() - start_wait < wait_time:
-                    # Check if button is now enabled
-                    button_check = browser.execute_script("""
-                        const exportButtons = Array.from(document.querySelectorAll('button'))
-                            .filter(el => (el.textContent.includes('EXPORT CSV') || 
-                                         el.textContent.includes('Export CSV')) &&
-                                         !el.disabled && 
-                                         !el.hasAttribute('disabled'));
+                    // Look for elements to the left or above
+                    const candidates = Array.from(document.querySelectorAll('*'))
+                        .filter(el => {
+                            if (el.children.length > 0) return false;
+                            const elRect = el.getBoundingClientRect();
+                            const text = el.textContent.trim();
+                            
+                            // Skip if it's a dollar amount itself
+                            if (text.includes('$')) return false;
+                            
+                            // Skip if text is too short or too long
+                            if (text.length < 2 || text.length > 50) return false;
+                            
+                            // Check if it's to the left of the dollar amount (same row)
+                            const sameRow = Math.abs(elRect.y - rect.y) < 20 && elRect.x < rect.x;
+                            
+                            // Or check if it's in the row above and aligned
+                            const rowAbove = (rect.y - elRect.y) > 20 && (rect.y - elRect.y) < 60 && 
+                                             Math.abs(elRect.x - rect.x) < 100;
+                            
+                            return sameRow || rowAbove;
+                        });
+                    
+                    if (candidates.length === 0) return null;
+                    
+                    // Sort by horizontal distance (for same row) or by vertical distance (for row above)
+                    candidates.sort((a, b) => {
+                        const aRect = a.getBoundingClientRect();
+                        const bRect = b.getBoundingClientRect();
                         
-                        if (exportButtons.length > 0) {
-                            exportButtons[0].click();
-                            return true;
+                        // Same row - sort by x distance
+                        if (Math.abs(aRect.y - rect.y) < 20 && Math.abs(bRect.y - rect.y) < 20) {
+                            return (rect.x - aRect.x) - (rect.x - bRect.x);
                         }
-                        return false;
-                    """)
-                    
-                    if button_check:
-                        logger.info("Export button became enabled and was clicked")
-                        button_enabled = True
-                        break
-                    
-                    # Wait before checking again
-                    time.sleep(3)
-                
-                # If button still disabled, try forcing a click anyway
-                if not button_enabled:
-                    logger.warning("Export button remained disabled - attempting to force click")
-                    
-                    force_result = browser.execute_script("""
-                        // Find any export button regardless of enabled state
-                        const exportButtons = document.querySelectorAll('button.export-summary-btn, button[class*="export"]');
                         
-                        if (exportButtons.length > 0) {
-                            // Remove disabled attribute
-                            const button = exportButtons[0];
-                            button.disabled = false;
-                            button.removeAttribute('disabled');
-                            
-                            // Force click
-                            button.click();
-                            return true;
-                        }
-                        return false;
-                    """)
+                        // Different rows - sort by y distance
+                        return (rect.y - aRect.y) - (rect.y - bRect.y);
+                    });
                     
-                    if force_result:
-                        logger.info("Forced click on disabled export button")
-                    else:
-                        logger.error("Could not force click on export button")
-                        # Try direct API request as last resort
-                        return None
-        
-        # Take screenshot after clicking export
-        take_screenshot(browser, "after_export_attempt")
-        
-        # Retrieve download logs
-        download_logs = browser.execute_script("return window.downloadLogs || [];")
-        if download_logs:
-            logger.info("Download debug logs from browser:")
-            for log_entry in download_logs:
-                logger.info(f"  {log_entry.get('time', '')}: {log_entry.get('message', '')}")
-        
-        # Wait for download to complete
-        logger.info("Waiting for download to complete...")
-        wait_time = 60  # 1 minute wait maximum
-        start_time = time.time()
-        
-        # First try to get data directly from the intercepted content
-        while time.time() - start_time < wait_time:
-            # Check for download data from JavaScript interception
-            for data_var in ["downloadData", "csvContent"]:
-                try:
-                    csv_data = browser.execute_script(f"return window.{data_var};")
-                    if csv_data:
-                        if isinstance(csv_data, dict) and csv_data.get('content'):
-                            csv_content = csv_data.get('content')
-                        else:
-                            csv_content = csv_data
-                            
-                        if csv_content and isinstance(csv_content, str):
-                            logger.info(f"Found download data directly from {data_var}!")
-                            
-                            # Save the content to a file
-                            file_path = os.path.join("/tmp", f"blob_download_{int(time.time())}.csv")
-                            
-                            with open(file_path, 'w', encoding='utf-8') as f:
-                                f.write(csv_content)
-                            
-                            logger.info(f"Saved blob data to {file_path}")
-                            
-                            # Verify it's a valid CSV with expected columns
-                            try:
-                                df = pd.read_csv(file_path)
-                                logger.info(f"Successfully read CSV with {len(df)} rows and {len(df.columns)} columns")
-                                
-                                # Check if this looks like a valid call logs export
-                                required_columns = ['Target', 'Campaign', 'RPC', 'Revenue']
-                                has_required = any(col in df.columns for col in required_columns)
-                                
-                                if has_required:
-                                    logger.info("CSV contains expected columns")
-                                    return file_path
-                                else:
-                                    logger.warning(f"CSV does not contain expected columns. Found: {df.columns.tolist()}")
-                            except Exception as e:
-                                logger.warning(f"Data is not a valid CSV: {str(e)}")
-                except Exception as e:
-                    logger.warning(f"Error checking {data_var}: {str(e)}")
-            
-            # Check if there are any new CSV files in the download directories
-            new_files = []
-            
-            # Check all possible download directories for new files
-            for d in possible_download_dirs:
-                try:
-                    # Get all CSV files in this directory
-                    curr_files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.csv')]
-                    
-                    # Check which ones are new
-                    for file_path in curr_files:
-                        if file_path not in existing_csv_files:
-                            # New file found
-                            new_files.append(file_path)
-                        elif os.path.getmtime(file_path) > existing_csv_files.get(file_path, 0):
-                            # File was modified since we started
-                            new_files.append(file_path)
-                except Exception as e:
-                    logger.warning(f"Error checking directory {d}: {str(e)}")
-            
-            if new_files:
-                # Sort by modification time (newest first)
-                new_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
-                newest_file = new_files[0]
-                
-                logger.info(f"Found new CSV file: {newest_file}")
-                
-                # Verify it's a valid CSV
-                try:
-                    df = pd.read_csv(newest_file)
-                    logger.info(f"Successfully read CSV with {len(df)} rows and {len(df.columns)} columns")
-                    
-                    # Check if this looks like a valid call logs export
-                    required_columns = ['Target', 'Campaign', 'RPC', 'Revenue']
-                    has_required = any(col in df.columns for col in required_columns)
-                    
-                    if has_required:
-                        logger.info("CSV contains expected columns")
-                        return newest_file
-                    else:
-                        logger.warning(f"CSV does not contain expected columns. Found: {df.columns.tolist()}")
-                except Exception as e:
-                    logger.warning(f"File {newest_file} is not a valid CSV: {str(e)}")
-            
-            # Log progress every 10 seconds
-            elapsed = int(time.time() - start_time)
-            if elapsed % 10 == 0:
-                logger.info(f"Still waiting for download... ({elapsed}s elapsed)")
-            
-            time.sleep(2)
-        
-        logger.warning("No new CSV files found after waiting")
-        
-        # Try to use Ringba API as a last resort
-        logger.info("Trying Ringba API as fallback...")
-        try:
-            api_token = os.getenv('RINGBA_API_TOKEN')
-            account_id = os.getenv('RINGBA_ACCOUNT_ID')
-            
-            if api_token and account_id:
-                # Get today's date range for the API query
-                today = datetime.now()
-                start_date = today.strftime('%Y-%m-%d')
-                end_date = today.strftime('%Y-%m-%d')
-                
-                # Try different API endpoints
-                api_endpoints = [
-                    f"https://api.ringba.com/v2/accounts/{account_id}/call-logs",
-                    f"https://api.ringba.com/v2/ringba/accounts/{account_id}/call-logs",
-                    f"https://api.ringba.com/v2/accounts/{account_id}/reports/call-logs",
-                    f"https://api.ringba.com/v2/accounts/{account_id}/exports/calls"
-                ]
-                
-                # Use Ringba API to get call data
-                headers = {
-                    'Authorization': f'Bearer {api_token}',
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
+                    return candidates[0];
                 }
                 
-                for endpoint in api_endpoints:
-                    logger.info(f"Trying API endpoint: {endpoint}")
+                // Extract RPC and corresponding Target names
+                const results = [];
+                dollarElements.forEach(element => {
+                    const rpcText = element.textContent.trim();
                     
-                    params = {
-                        'startDate': start_date,
-                        'endDate': end_date,
-                        'format': 'csv'
+                    // Verify this looks like an RPC value
+                    if (!/\\$\\d+(\\.\\d+)?/.test(rpcText)) return;
+                    
+                    const targetElement = findNearestText(element);
+                    if (targetElement) {
+                        results.push({
+                            Target: targetElement.textContent.trim(),
+                            RPC: rpcText
+                        });
                     }
-                    
-                    try:
-                        response = requests.get(endpoint, headers=headers, params=params)
-                        
-                        if response.status_code == 200:
-                            logger.info("Successfully retrieved data from Ringba API")
-                            
-                            # Save response content to a CSV file
-                            download_dir = "/tmp"
-                            os.makedirs(download_dir, exist_ok=True)
-                            file_path = os.path.join(download_dir, f"ringba_api_{int(time.time())}.csv")
-                            
-                            with open(file_path, 'w', encoding='utf-8') as f:
-                                f.write(response.text)
-                            
-                            logger.info(f"Saved API response to {file_path}")
-                            
-                            # Verify it's a valid CSV
-                            try:
-                                df = pd.read_csv(file_path)
-                                logger.info(f"API CSV has {len(df)} rows and {len(df.columns)} columns")
-                                return file_path
-                            except Exception as e:
-                                logger.warning(f"API response not a valid CSV: {str(e)}")
-                        else:
-                            logger.warning(f"API call to {endpoint} failed with status {response.status_code}")
-                    except Exception as e:
-                        logger.warning(f"Error calling API endpoint {endpoint}: {str(e)}")
-            else:
-                logger.warning("Missing API token or account ID, can't use API fallback")
-        except Exception as e:
-            logger.error(f"Error using Ringba API: {str(e)}")
+                });
+                
+                return results;
+            """)
             
-        # If all methods fail, give up
-        logger.error("All methods to export CSV have failed")
-        return None
-        
+            if target_rpc_data and len(target_rpc_data) > 0:
+                logger.info(f"Found {len(target_rpc_data)} potential Target/RPC pairs using last resort method")
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(target_rpc_data)
+                
+                # Save to CSV file
+                file_path = os.path.join("/tmp", f"text_extract_{int(time.time())}.csv")
+                df.to_csv(file_path, index=False)
+                
+                logger.info(f"Saved extracted text data to {file_path}")
+                return file_path
+            
+            # If all extraction methods fail
+            logger.error("All extraction methods failed to find data")
+            return None
+            
     except Exception as e:
-        logger.error(f"Error in click_export_csv: {str(e)}")
-        take_screenshot(browser, "export_error")
+        logger.error(f"Error extracting table data: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        take_screenshot(browser, "extraction_error")
         return None
 
 def process_csv_file(file_path):
