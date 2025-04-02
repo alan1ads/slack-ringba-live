@@ -407,7 +407,7 @@ def set_date_range(browser, start_date, end_date):
     return True
 
 def click_export_csv(browser):
-    """Click the Export CSV button and capture the downloaded file in container environments"""
+    """Click the Export CSV button and wait for the download to complete"""
     try:
         # Navigate directly to the summary page with export option
         logger.info("Navigating directly to call summary report...")
@@ -422,379 +422,7 @@ def click_export_csv(browser):
         # Take screenshot to see page state
         take_screenshot(browser, "before_export_attempt")
         
-        # APPROACH 1: First try to extract data directly from the table - this is more reliable in container environments
-        logger.info("First extracting table data directly from page (most reliable method)...")
-        table_data = browser.execute_script("""
-            // Find all tables and grid components in the page
-            const tables = document.querySelectorAll('table');
-            console.log(`Found ${tables.length} tables on page`);
-            
-            const gridElements = document.querySelectorAll('[role="grid"], [role="table"], .grid, .table, .data-grid');
-            console.log(`Found ${gridElements.length} grid elements on page`);
-            
-            // Find row elements that might contain data
-            const rowElements = document.querySelectorAll('[role="row"], tr, .row');
-            console.log(`Found ${rowElements.length} row elements on page`);
-            
-            // Function to extract data from standard table 
-            function extractFromTable(table) {
-                const headers = [];
-                const rows = [];
-                
-                // Special handling for Ringba table with filter buttons for column headers
-                // First check if this might be the Ringba reporting table by looking for specific elements
-                const filterButtons = table.querySelectorAll('button[class*="filter"], th button, th .mat-sort-header-container');
-                const isRingbaTable = filterButtons.length > 0 || 
-                                      table.closest('.report-view, .call-logs, .summary-report') !== null;
-                
-                if (isRingbaTable) {
-                    console.log('Detected potential Ringba reporting table');
-                    
-                    // These are the expected column names in the Ringba reporting table based on the screenshot
-                    const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
-                                         'Number Pool', 'Date', 'Duplicate', 'Tags', 'IVR Handle Time',
-                                         'RPC', 'Revenue', 'Payout'];
-                    
-                    // Try to find header row with filter buttons or column headers
-                    const headerRow = table.querySelector('thead tr') || 
-                                      table.querySelector('tr:first-child') ||
-                                      document.querySelector('.mat-header-row, [role="row"]:first-child');
-                    
-                    if (headerRow) {
-                        // Get all header cells
-                        const headerCells = headerRow.querySelectorAll('th, td, .mat-header-cell, [role="columnheader"]');
-                        
-                        headerCells.forEach(cell => {
-                            // Get text content of the cell, including any nested elements
-                            let headerText = cell.textContent.trim();
-                            
-                            // Check if header contains a button (common in sortable Ringba tables)
-                            const buttonText = cell.querySelector('button, .mat-sort-header-container')?.textContent.trim();
-                            if (buttonText) {
-                                headerText = buttonText;
-                            }
-                            
-                            // Clean up the header text
-                            headerText = headerText.replace(/▼|▲|↓|↑/g, '').trim();
-                            
-                            // Match against expected headers if text is ambiguous or empty
-                            if (!headerText || headerText === '↕' || headerText.length < 2) {
-                                // Try to infer header from column index and position
-                                const index = headers.length;
-                                if (index < expectedHeaders.length) {
-                                    headerText = expectedHeaders[index];
-                                    console.log(`Inferred header ${headerText} based on position`);
-                                } else {
-                                    headerText = `Column${index+1}`;
-                                }
-                            }
-                            
-                            headers.push(headerText);
-                        });
-                        
-                        console.log('Extracted headers:', headers);
-                    } else {
-                        console.log('No header row found in Ringba table, using expected headers');
-                        // If we can't find header cells, use the expected headers
-                        expectedHeaders.forEach(header => headers.push(header));
-                    }
-                } else {
-                    // Standard header extraction for non-Ringba tables
-                    const headerCells = table.querySelectorAll('th') || table.querySelectorAll('tr:first-child td');
-                    headerCells.forEach(cell => headers.push(cell.textContent.trim()));
-                }
-                
-                // Get data rows
-                const dataRows = table.querySelectorAll('tbody tr') || 
-                                 table.querySelectorAll('tr:not(:first-child)') || 
-                                 document.querySelectorAll('.mat-row, [role="row"]:not(:first-child)');
-                
-                dataRows.forEach(row => {
-                    const rowData = {};
-                    const cells = row.querySelectorAll('td, .mat-cell, [role="cell"]');
-                    
-                    // Skip header rows or rows with no cells
-                    if (cells.length === 0 || row.closest('thead')) return;
-                    
-                    for (let i = 0; i < Math.min(cells.length, headers.length || cells.length); i++) {
-                        const cellText = cells[i].textContent.trim();
-                        const headerName = headers[i] || `Column${i+1}`;
-                        rowData[headerName] = cellText;
-                    }
-                    
-                    if (Object.keys(rowData).length > 0) {
-                        rows.push(rowData);
-                    }
-                });
-                
-                return { headers, rows };
-            }
-            
-            // Function to extract from Angular/React grid components 
-            function extractFromGrid(grid) {
-                const headers = [];
-                const rows = [];
-                
-                // Try to get headers from different possible structures
-                const headerCells = grid.querySelectorAll('[role="columnheader"], .header-cell, .column-header, th');
-                
-                // These are the expected column names in the Ringba reporting table
-                const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
-                                     'Number Pool', 'Date', 'Duplicate', 'Tags', 'IVR Handle Time',
-                                     'RPC', 'Revenue', 'Payout'];
-                                     
-                // Check if this is likely the Ringba reporting grid
-                const isRingbaGrid = grid.closest('.report-view, .call-logs, .summary-report') !== null || 
-                                    headerCells.length >= 6; // Ringba tables typically have many columns
-                
-                if (headerCells.length > 0) {
-                    headerCells.forEach(cell => {
-                        let headerText = cell.textContent.trim();
-                        
-                        // Clean up the header text
-                        headerText = headerText.replace(/▼|▲|↓|↑/g, '').trim();
-                        
-                        headers.push(headerText);
-                    });
-                } else if (isRingbaGrid) {
-                    // If we can't find header cells but this looks like a Ringba grid, use the expected headers
-                    console.log('Using expected Ringba headers for grid');
-                    expectedHeaders.forEach(header => headers.push(header));
-                }
-                
-                // Try to get rows from different possible structures  
-                const dataRows = grid.querySelectorAll('[role="row"], .row, .data-row');
-                dataRows.forEach(row => {
-                    // Skip if this is likely a header row
-                    if (row.getAttribute('role') === 'columnheader' || 
-                        row.classList.contains('header-row') || 
-                        row.parentElement.tagName === 'THEAD') {
-                        return;
-                    }
-                    
-                    const rowData = {};
-                    const cells = row.querySelectorAll('[role="cell"], .cell, .data-cell, td');
-                    
-                    for (let i = 0; i < Math.min(cells.length, headers.length || cells.length); i++) {
-                        const headerName = headers[i] || `Column${i+1}`;
-                        // Use expected header if available for this position
-                        const mappedHeader = isRingbaGrid && i < expectedHeaders.length ? 
-                                            expectedHeaders[i] : headerName;
-                        rowData[mappedHeader] = cells[i].textContent.trim();
-                    }
-                    
-                    if (Object.keys(rowData).length > 0) {
-                        rows.push(rowData);
-                    }
-                });
-                
-                return { headers, rows };
-            }
-            
-            // Extract data from all tables and grids and find the best one
-            let bestData = null;
-            let maxRows = 0;
-            
-            // CUSTOM EXTRACTION FOR RINGBA TABLE - UPDATED FOR SPECIFIC RINGBA SUMMARY TABLE LAYOUT
-            // First try a targeted approach specifically for the Ringba reporting table with focus on data rows
-            try {
-                console.log('Attempting targeted extraction for Ringba summary table');
-                
-                // Check if we can see the table headers first
-                const tableHeaders = document.querySelectorAll('th, [role="columnheader"]');
-                console.log(`Found ${tableHeaders.length} table headers`);
-                
-                // Extract header texts for debug
-                const headerTexts = [];
-                tableHeaders.forEach(th => headerTexts.push(th.textContent.trim()));
-                console.log('Header texts:', headerTexts.join(', '));
-                
-                // Expected column names based on screenshot
-                const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
-                                    'Number Pool', 'Date', 'Duplicate', 'Tags', 'RPC', 'Revenue', 'Payout'];
-                
-                // Use the headers we found or fall back to expected headers
-                const headers = headerTexts.length >= 3 ? headerTexts : expectedHeaders;
-                
-                // First try direct approach - find all cells on the page with data
-                // This extracts even if we can't identify the table structure
-                console.log("Direct cell extraction approach");
-                
-                // Find ALL div/span elements that might contain cell data
-                const allTexts = Array.from(document.querySelectorAll('td, [role="cell"], div, span'))
-                    .filter(el => {
-                        // Only leaf nodes (no children elements)
-                        if (el.children.length > 0) return false;
-                        
-                        // Has text content
-                        if (!el.textContent.trim()) return false;
-                        
-                        // Not a button or link
-                        if (el.tagName === 'BUTTON' || el.tagName === 'A') return false;
-                        
-                        // Not too short (likely not a cell value)
-                        if (el.textContent.trim().length < 2) return false;
-                        
-                        return true;
-                    });
-                
-                console.log(`Found ${allTexts.length} text elements that might be cells`);
-                
-                // Group texts by their vertical position to identify rows
-                const rows = [];
-                const rowsByPosition = {};
-                
-                allTexts.forEach(el => {
-                    // Get position
-                    const rect = el.getBoundingClientRect();
-                    // Use a ~10px range for grouping by vertical position
-                    const rowPosition = Math.floor(rect.top / 10) * 10;
-                    
-                    // Initialize row array if needed
-                    if (!rowsByPosition[rowPosition]) {
-                        rowsByPosition[rowPosition] = [];
-                    }
-                    
-                    // Add to row group
-                    rowsByPosition[rowPosition].push({
-                        text: el.textContent.trim(),
-                        x: rect.left,
-                        element: el
-                    });
-                });
-                
-                // Sort cells within each row by x position (left to right)
-                Object.keys(rowsByPosition).forEach(rowPos => {
-                    const rowCells = rowsByPosition[rowPos].sort((a, b) => a.x - b.x);
-                    
-                    // Skip rows with too few cells
-                    if (rowCells.length < 3) return;
-                    
-                    // Create row data object
-                    const rowData = {};
-                    for (let i = 0; i < Math.min(rowCells.length, headers.length); i++) {
-                        rowData[headers[i]] = rowCells[i].text;
-                    }
-                    
-                    // Only add rows that have key data fields
-                    if (rowData.Target && rowData.RPC) {
-                        rows.push(rowData);
-                    }
-                });
-                
-                console.log(`Extracted ${rows.length} rows by direct cell extraction`);
-                
-                // If direct cell approach found rows, use them
-                if (rows.length > 0) {
-                    console.log("Using rows from direct cell extraction");
-                    bestData = {
-                        headers: headers,
-                        rows: rows
-                    };
-                    maxRows = rows.length;
-                } else {
-                    // Traditional approach - find the table element
-                    const mainTable = document.querySelector('table, [role="grid"]');
-                    
-                    if (mainTable) {
-                        console.log('Found main table element:', mainTable.tagName);
-                        
-                        // Get all rows
-                        const tableRows = mainTable.querySelectorAll('tr, [role="row"]');
-                        console.log(`Found ${tableRows.length} rows in main table`);
-                        
-                        // Extract rows data
-                        const extractedRows = [];
-                        
-                        Array.from(tableRows).forEach((row, idx) => {
-                            // Skip header row(s)
-                            if (row.querySelector('th') || idx === 0) return;
-                            
-                            // Get all cells
-                            const cells = row.querySelectorAll('td, [role="cell"]');
-                            if (cells.length < 3) return;
-                            
-                            // Create row data object
-                            const rowData = {};
-                            for (let i = 0; i < Math.min(cells.length, headers.length); i++) {
-                                rowData[headers[i]] = cells[i].textContent.trim();
-                            }
-                            
-                            // Only add if we have data in required columns
-                            if (Object.keys(rowData).length >= 3) {
-                                extractedRows.push(rowData);
-                            }
-                        });
-                        
-                        console.log(`Extracted ${extractedRows.length} rows from main table`);
-                        
-                        if (extractedRows.length > 0) {
-                            bestData = {
-                                headers: headers,
-                                rows: extractedRows
-                            };
-                            maxRows = extractedRows.length;
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error('Error in targeted Ringba extraction:', e);
-            }
-            
-            // If targeted approach didn't work, fall back to other methods
-            if (!bestData || bestData.rows.length === 0) {
-                // Try fallback methods here...
-                // The original code for table and grid extraction follows...
-                
-                // Try tables first
-                tables.forEach(table => {
-                    const data = extractFromTable(table);
-                    if (data.rows.length > maxRows) {
-                        maxRows = data.rows.length;
-                        bestData = data;
-                    }
-                });
-                
-                // Then try grid components
-                gridElements.forEach(grid => {
-                    const data = extractFromGrid(grid);
-                    if (data.rows.length > maxRows) {
-                        maxRows = data.rows.length;
-                        bestData = data;
-                    }
-                });
-            }
-            
-            // ...rest of the scanning code for rows...
-            
-            // Add debugging to show which columns were found
-            if (bestData && bestData.headers) {
-                console.log('Found headers:', bestData.headers.join(', '));
-            }
-            
-            // Return the best data found
-            return bestData;
-        """)
-        
-        if table_data and table_data.get('rows') and len(table_data.get('rows')) > 0:
-            logger.info(f"Successfully extracted table data directly: {len(table_data['rows'])} rows")
-            
-            # Save to CSV
-            download_dir = "/tmp"
-            os.makedirs(download_dir, exist_ok=True)
-            file_path = os.path.join(download_dir, f"direct_extract_{int(time.time())}.csv")
-            
-            # Convert to DataFrame and save
-            df = pd.DataFrame(table_data['rows'])
-            df.to_csv(file_path, index=False)
-            
-            logger.info(f"Saved directly extracted data to {file_path}")
-            return file_path
-        else:
-            logger.warning("Could not extract table data directly, will try button click")
-        
-        # APPROACH 2: Try to click the export button and intercept the download
-        # Enhanced JavaScript that intercepts blob URLs and download events 
+        # SKIP TABLE EXTRACTION - Focus ONLY on clicking the Export CSV button
         logger.info("Setting up enhanced blob URL interception...")
         browser.execute_script("""
             // Store blob URLs and download data
@@ -999,143 +627,6 @@ def click_export_csv(browser):
                 // Not a monitored URL, just pass through
                 return originalFetch.apply(this, arguments);
             };
-            
-            // Monitor download clicks
-            document.addEventListener('click', function(e) {
-                let target = e.target;
-                
-                // Check if clicked element or its parent is a button/link containing "export" or "csv"
-                while (target && target !== document) {
-                    // Check for common download indicators
-                    const isDownloadElem = 
-                        (target.tagName === 'A' && target.href && target.href.startsWith('blob:')) ||
-                        (target.tagName === 'BUTTON' && 
-                          (target.textContent.toLowerCase().includes('export') || 
-                           target.textContent.toLowerCase().includes('csv')));
-                    
-                    if (isDownloadElem) {
-                        logDownloadInfo('Export/download element clicked: ' + target.tagName + 
-                                        ' text: ' + target.textContent.trim());
-                        
-                        // For blob URLs, try to read the content
-                        if (target.tagName === 'A' && target.href && target.href.startsWith('blob:')) {
-                            logDownloadInfo('Blob URL clicked: ' + target.href);
-                            
-                            // Find matching blob
-                            const blobInfo = window.blobUrls.find(b => b.url === target.href);
-                            if (blobInfo && blobInfo.blob) {
-                                // Read the blob content
-                                const reader = new FileReader();
-                                reader.onload = function() {
-                                    const content = reader.result;
-                                    logDownloadInfo('Read blob from click, length: ' + content.length);
-                                    
-                                    window.csvContent = content;
-                                    window.downloadData = {
-                                        content: content,
-                                        timestamp: Date.now(),
-                                        type: blobInfo.blob.type || 'text/csv'
-                                    };
-                                };
-                                reader.readAsText(blobInfo.blob);
-                            }
-                        }
-                    }
-                    
-                    target = target.parentElement;
-                }
-            }, true);
-
-            // Export specific helper to find the Export CSV button exactly as shown in screenshot
-            window.findAndClickExportButton = function() {
-                logDownloadInfo('Looking for EXPORT CSV button...');
-                
-                // Specific approach for finding the exact EXPORT CSV button from the screenshot
-                // Find by button text matching exactly "EXPORT CSV"
-                const exactButtonMatches = Array.from(document.querySelectorAll('button'))
-                    .filter(el => el.textContent.trim() === 'EXPORT CSV');
-                
-                // Find by class name containing "export"
-                const exportButtons = Array.from(document.querySelectorAll('button[class*="export"], .export-button, .export-summary-btn'));
-                
-                // First check if button is disabled
-                const allButtons = [...exactButtonMatches, ...exportButtons];
-                
-                if (allButtons.length > 0) {
-                    // Check if any buttons are enabled
-                    const enabledButtons = allButtons.filter(btn => !btn.disabled && !btn.hasAttribute('disabled'));
-                    
-                    if (enabledButtons.length > 0) {
-                        // Use the first enabled button
-                        const button = enabledButtons[0];
-                        logDownloadInfo('Found enabled export button: ' + button.outerHTML);
-                        button.click();
-                        return 'Clicked enabled export button';
-                    } else {
-                        // All buttons are disabled - try to wait and see if they become enabled
-                        const firstButton = allButtons[0];
-                        logDownloadInfo('Found export button but it is disabled: ' + firstButton.outerHTML);
-                        
-                        // Try to find why it might be disabled
-                        if (document.querySelectorAll('.loading, .loading-indicator, .spinner').length > 0) {
-                            logDownloadInfo('Page appears to be loading, button may be temporarily disabled');
-                        }
-                        
-                        // Log all buttons found for debugging
-                        allButtons.forEach((btn, i) => {
-                            logDownloadInfo(`Button ${i+1}: ${btn.outerHTML}`);
-                        });
-                        
-                        return 'Export button found but disabled';
-                    }
-                }
-                
-                // Try more general approach if specific methods fail
-                const anyExportButtons = Array.from(document.querySelectorAll('button, a, span, div'))
-                    .filter(el => el.textContent && 
-                        (el.textContent.toLowerCase().includes('export') || 
-                         el.textContent.toLowerCase().includes('csv')));
-                
-                if (anyExportButtons.length > 0) {
-                    // Sort by likelihood of being the export button
-                    anyExportButtons.sort((a, b) => {
-                        // Exact match gets highest priority
-                        const aText = a.textContent.toLowerCase().trim();
-                        const bText = b.textContent.toLowerCase().trim();
-                        
-                        if (aText === 'export csv' && bText !== 'export csv') return -1;
-                        if (bText === 'export csv' && aText !== 'export csv') return 1;
-                        
-                        // Enabled buttons get priority
-                        if (!a.disabled && b.disabled) return -1;
-                        if (a.disabled && !b.disabled) return 1;
-                        
-                        // Button elements get priority
-                        if (a.tagName === 'BUTTON' && b.tagName !== 'BUTTON') return -1;
-                        if (b.tagName === 'BUTTON' && a.tagName !== 'BUTTON') return 1;
-                        
-                        // Otherwise sort by simplicity/brevity of text
-                        return aText.length - bText.length;
-                    });
-                    
-                    // Warn if best candidate is disabled
-                    const bestButton = anyExportButtons[0];
-                    if (bestButton.disabled || bestButton.hasAttribute('disabled')) {
-                        logDownloadInfo(`Best candidate button is disabled: ${bestButton.outerHTML}`);
-                        return 'Best export button candidate is disabled';
-                    }
-                    
-                    // Click the best candidate
-                    logDownloadInfo('Clicking: ' + bestButton.tagName + ' with text: ' + bestButton.textContent.trim());
-                    bestButton.click();
-                    return 'Clicked button: ' + bestButton.textContent.trim();
-                }
-                
-                logDownloadInfo('No export buttons found');
-                return 'No buttons found';
-            };
-            
-            logDownloadInfo('Download interception setup complete');
         """)
         
         # Find all possible download directories - ONLY USE WRITABLE DIRECTORIES
@@ -1174,156 +665,183 @@ def click_export_csv(browser):
             except Exception as e:
                 logger.warning(f"Error checking directory {d}: {str(e)}")
         
-        # Click the export button using our enhanced methods
-        export_clicked = False
+        # FOCUS ON EXPORT BUTTON - Find and try to click it
+        logger.info("Looking for EXPORT CSV button...")
         
-        logger.info("Looking for and clicking the EXPORT CSV button...")
-        try:
-            # Try our specific finder for the Export CSV button from screenshot
-            result = browser.execute_script("return window.findAndClickExportButton();")
-            logger.info(f"JavaScript export button click result: {result}")
-            export_clicked = True
+        # Check if the button exists but might be disabled
+        button_info = browser.execute_script("""
+            // First look for button with "EXPORT CSV" text
+            const buttons = Array.from(document.querySelectorAll('button'))
+                .filter(el => el.textContent.trim().includes('EXPORT CSV') || 
+                             el.textContent.trim().includes('Export CSV'));
+                
+            // Also check for export buttons by class name
+            const exportButtons = Array.from(document.querySelectorAll('button.export-summary-btn, button[class*="export"]'))
+                .filter(el => el.textContent.toLowerCase().includes('export'));
+                
+            const allButtons = [...buttons, ...exportButtons];
             
-            # Check if button was found but disabled
-            if "disabled" in result:
+            // Check if we found any buttons
+            if (allButtons.length === 0) {
+                return {status: 'not_found', message: 'No export buttons found'};
+            }
+            
+            // Check if any buttons are enabled
+            const enabledButtons = allButtons.filter(el => !el.disabled && !el.hasAttribute('disabled'));
+            if (enabledButtons.length > 0) {
+                // Click the first enabled button
+                enabledButtons[0].click();
+                return {
+                    status: 'clicked',
+                    message: 'Clicked enabled button', 
+                    html: enabledButtons[0].outerHTML
+                };
+            } else {
+                // Return info about disabled button
+                return {
+                    status: 'disabled',
+                    message: 'Button found but disabled',
+                    html: allButtons[0].outerHTML
+                };
+            }
+        """)
+        
+        # Log button information
+        if isinstance(button_info, dict):
+            logger.info(f"Button status: {button_info.get('status')} - {button_info.get('message')}")
+            if 'html' in button_info:
+                logger.info(f"Button HTML: {button_info.get('html')}")
+                
+            # Check if button is disabled
+            if button_info.get('status') == 'disabled':
                 logger.warning("Export button is disabled - waiting to see if it becomes enabled")
                 
-                # Wait up to 30 seconds to see if button becomes enabled
-                wait_time = 30
+                # Wait up to 45 seconds for button to become enabled
+                wait_time = 45
                 start_wait = time.time()
                 button_enabled = False
                 
+                # Take screenshot of disabled button state
+                take_screenshot(browser, "disabled_export_button")
+                
+                # Try to identify why button might be disabled
+                status_info = browser.execute_script("""
+                    // Check for loading indicators
+                    const loadingElements = document.querySelectorAll('.loading, .spinner, [class*="loading"]');
+                    
+                    // Check for status messages
+                    const statusMessages = document.querySelectorAll('.status, .message, .notification');
+                    
+                    // Check for error messages
+                    const errorMessages = document.querySelectorAll('.error, .alert');
+                    
+                    return {
+                        loading: loadingElements.length > 0,
+                        status: Array.from(statusMessages).map(el => el.textContent.trim()),
+                        errors: Array.from(errorMessages).map(el => el.textContent.trim())
+                    };
+                """)
+                
+                if isinstance(status_info, dict):
+                    if status_info.get('loading'):
+                        logger.info("Page appears to be loading - waiting for it to complete")
+                    if status_info.get('status'):
+                        logger.info(f"Status messages found: {status_info.get('status')}")
+                    if status_info.get('errors'):
+                        logger.warning(f"Error messages found: {status_info.get('errors')}")
+                
+                # Try clicking the date picker or refresh button to load data
+                browser.execute_script("""
+                    // Try clicking date picker to load data
+                    const datePickers = document.querySelectorAll('.date-picker, [class*="date"], [id*="date"]');
+                    if (datePickers.length > 0) {
+                        console.log('Clicking date picker to load data');
+                        datePickers[0].click();
+                        
+                        // Now click "Today" or "Apply" if available
+                        setTimeout(() => {
+                            const applyButtons = document.querySelectorAll('button:contains("Apply"), button:contains("Today")');
+                            if (applyButtons.length > 0) {
+                                console.log('Clicking Apply/Today button');
+                                applyButtons[0].click();
+                            }
+                        }, 1000);
+                    }
+                    
+                    // Try clicking refresh button
+                    const refreshButtons = document.querySelectorAll('button:contains("Refresh"), [class*="refresh"]');
+                    if (refreshButtons.length > 0) {
+                        console.log('Clicking refresh button');
+                        refreshButtons[0].click();
+                    }
+                """)
+                
+                # Wait and check if button becomes enabled
                 while time.time() - start_wait < wait_time:
                     # Check if button is now enabled
-                    check_result = browser.execute_script("""
-                        const exportButtons = Array.from(document.querySelectorAll('button[class*="export"], .export-button, .export-summary-btn, button'));
-                        const enabledButtons = exportButtons.filter(btn => {
-                            return btn.textContent.toLowerCase().includes('export') && 
-                                   !btn.disabled && 
-                                   !btn.hasAttribute('disabled');
-                        });
-                        if (enabledButtons.length > 0) {
-                            console.log('Found enabled button:', enabledButtons[0].outerHTML);
-                            enabledButtons[0].click();
+                    button_check = browser.execute_script("""
+                        const exportButtons = Array.from(document.querySelectorAll('button'))
+                            .filter(el => (el.textContent.includes('EXPORT CSV') || 
+                                         el.textContent.includes('Export CSV')) &&
+                                         !el.disabled && 
+                                         !el.hasAttribute('disabled'));
+                        
+                        if (exportButtons.length > 0) {
+                            exportButtons[0].click();
                             return true;
                         }
                         return false;
                     """)
                     
-                    if check_result:
+                    if button_check:
                         logger.info("Export button became enabled and was clicked")
                         button_enabled = True
-                        export_clicked = True
                         break
                     
-                    # Wait a bit before checking again
+                    # Wait before checking again
                     time.sleep(3)
                 
+                # If button still disabled, try forcing a click anyway
                 if not button_enabled:
-                    logger.warning("Export button remained disabled after waiting - will rely on table extraction instead")
-                    # Force table extraction by returning None early
-                    return browser.execute_script("""
-                        // Try to check why button might be disabled
-                        const statusText = document.querySelector('.status-text, .error-text, .message')?.textContent;
-                        if (statusText) {
-                            console.log('Status message found:', statusText);
-                        }
-                        
-                        // Check if we're in a preview or limited data mode
-                        const previewMode = document.querySelector('.preview-mode, .limited-data');
-                        if (previewMode) {
-                            console.log('Page appears to be in preview mode');
-                        }
-                        
-                        // log any error messages
-                        const errors = document.querySelectorAll('.error, .alert, [role="alert"]');
-                        if (errors.length > 0) {
-                            console.log('Found error messages:');
-                            errors.forEach(err => console.log(' - ' + err.textContent.trim()));
-                        }
-                        
-                        return null;
-                    """)
-            else:
-                # Button was clicked or not found
-                export_clicked = True
-            
-            # If that didn't work, use Selenium to try specific XPath or CSS selector
-            if "No buttons found" in result:
-                logger.warning("JavaScript button finder failed, trying Selenium...")
-                
-                # Try specific XPath matching the screenshot's EXPORT CSV button
-                try:
-                    # Try precise XPath for EXPORT CSV button in upper right corner
-                    export_button = browser.find_element(By.XPATH, "//button[text()='EXPORT CSV']")
-                    logger.info("Found EXPORT CSV button with exact text match")
-                    export_button.click()
-                    export_clicked = True
-                except Exception as e1:
-                    logger.warning(f"Exact EXPORT CSV button not found: {str(e1)}")
+                    logger.warning("Export button remained disabled - attempting to force click")
                     
-                    # Try CSS selector from screenshot context
-                    try:
-                        export_button = browser.find_element(By.CSS_SELECTOR, ".export-csv-button, button.export, [data-test='export-csv-button']")
-                        logger.info("Found export button with CSS selector")
-                        export_button.click()
-                        export_clicked = True
-                    except Exception as e2:
-                        logger.warning(f"CSS selector approach failed: {str(e2)}")
+                    force_result = browser.execute_script("""
+                        // Find any export button regardless of enabled state
+                        const exportButtons = document.querySelectorAll('button.export-summary-btn, button[class*="export"]');
                         
-                        # Try general button finding
-                        locators = [
-                            (By.XPATH, "//button[contains(text(), 'EXPORT CSV')]"),
-                            (By.XPATH, "//button[contains(text(), 'Export CSV')]"),
-                            (By.XPATH, "//button[contains(text(), 'EXPORT')]"),
-                            (By.XPATH, "//button[contains(text(), 'Export')]"),
-                            (By.XPATH, "//button[contains(text(), 'CSV')]"),
-                            (By.CSS_SELECTOR, "[id*='export']"),
-                            (By.CSS_SELECTOR, "[class*='export']"),
-                        ]
-                        
-                        for locator_type, locator_value in locators:
-                            try:
-                                elements = browser.find_elements(locator_type, locator_value)
-                                if elements:
-                                    logger.info(f"Found {len(elements)} export buttons with {locator_value}")
-                                    for el in elements:
-                                        try:
-                                            logger.info(f"Trying to click button: {el.text}")
-                                            el.click()
-                                            export_clicked = True
-                                            break
-                                        except:
-                                            continue
-                                    if export_clicked:
-                                        break
-                            except Exception as e:
-                                logger.warning(f"Error with locator {locator_value}: {str(e)}")
-        
-        except Exception as e:
-            logger.error(f"Error clicking export button: {str(e)}")
+                        if (exportButtons.length > 0) {
+                            // Remove disabled attribute
+                            const button = exportButtons[0];
+                            button.disabled = false;
+                            button.removeAttribute('disabled');
+                            
+                            // Force click
+                            button.click();
+                            return true;
+                        }
+                        return false;
+                    """)
+                    
+                    if force_result:
+                        logger.info("Forced click on disabled export button")
+                    else:
+                        logger.error("Could not force click on export button")
+                        # Try direct API request as last resort
+                        return None
         
         # Take screenshot after clicking export
         take_screenshot(browser, "after_export_attempt")
         
-        # Get download logs even if we couldn't click export
-        try:
-            download_logs = browser.execute_script("return window.downloadLogs || [];")
-            if download_logs:
-                logger.info("Download debug logs from browser:")
-                for log_entry in download_logs:
-                    logger.info(f"  {log_entry.get('time', '')}: {log_entry.get('message', '')}")
-        except Exception as e:
-            logger.warning(f"Could not retrieve download logs: {str(e)}")
-        
-        if not export_clicked:
-            logger.error("Could not click export button with any method")
-            # Return to direct data extraction as fallback
-            return None
+        # Retrieve download logs
+        download_logs = browser.execute_script("return window.downloadLogs || [];")
+        if download_logs:
+            logger.info("Download debug logs from browser:")
+            for log_entry in download_logs:
+                logger.info(f"  {log_entry.get('time', '')}: {log_entry.get('message', '')}")
         
         # Wait for download to complete
         logger.info("Waiting for download to complete...")
-        wait_time = 30  # 30 seconds wait maximum - reduced from 60
+        wait_time = 60  # 1 minute wait maximum
         start_time = time.time()
         
         # First try to get data directly from the intercepted content
@@ -1349,11 +867,20 @@ def click_export_csv(browser):
                             
                             logger.info(f"Saved blob data to {file_path}")
                             
-                            # Verify it's a valid CSV
+                            # Verify it's a valid CSV with expected columns
                             try:
                                 df = pd.read_csv(file_path)
                                 logger.info(f"Successfully read CSV with {len(df)} rows and {len(df.columns)} columns")
-                                return file_path
+                                
+                                # Check if this looks like a valid call logs export
+                                required_columns = ['Target', 'Campaign', 'RPC', 'Revenue']
+                                has_required = any(col in df.columns for col in required_columns)
+                                
+                                if has_required:
+                                    logger.info("CSV contains expected columns")
+                                    return file_path
+                                else:
+                                    logger.warning(f"CSV does not contain expected columns. Found: {df.columns.tolist()}")
                             except Exception as e:
                                 logger.warning(f"Data is not a valid CSV: {str(e)}")
                 except Exception as e:
@@ -1390,7 +917,16 @@ def click_export_csv(browser):
                 try:
                     df = pd.read_csv(newest_file)
                     logger.info(f"Successfully read CSV with {len(df)} rows and {len(df.columns)} columns")
-                    return newest_file
+                    
+                    # Check if this looks like a valid call logs export
+                    required_columns = ['Target', 'Campaign', 'RPC', 'Revenue']
+                    has_required = any(col in df.columns for col in required_columns)
+                    
+                    if has_required:
+                        logger.info("CSV contains expected columns")
+                        return newest_file
+                    else:
+                        logger.warning(f"CSV does not contain expected columns. Found: {df.columns.tolist()}")
                 except Exception as e:
                     logger.warning(f"File {newest_file} is not a valid CSV: {str(e)}")
             
@@ -1403,7 +939,7 @@ def click_export_csv(browser):
         
         logger.warning("No new CSV files found after waiting")
         
-        # APPROACH 3: Fall back to trying the API (though it was failing with 404 in logs)
+        # Try to use Ringba API as a last resort
         logger.info("Trying Ringba API as fallback...")
         try:
             api_token = os.getenv('RINGBA_API_TOKEN')
@@ -1415,6 +951,14 @@ def click_export_csv(browser):
                 start_date = today.strftime('%Y-%m-%d')
                 end_date = today.strftime('%Y-%m-%d')
                 
+                # Try different API endpoints
+                api_endpoints = [
+                    f"https://api.ringba.com/v2/accounts/{account_id}/call-logs",
+                    f"https://api.ringba.com/v2/ringba/accounts/{account_id}/call-logs",
+                    f"https://api.ringba.com/v2/accounts/{account_id}/reports/call-logs",
+                    f"https://api.ringba.com/v2/accounts/{account_id}/exports/calls"
+                ]
+                
                 # Use Ringba API to get call data
                 headers = {
                     'Authorization': f'Bearer {api_token}',
@@ -1422,39 +966,42 @@ def click_export_csv(browser):
                     'Accept': 'application/json'
                 }
                 
-                # Try the call logs API endpoint with different path
-                call_logs_url = f"https://api.ringba.com/v2/accounts/{account_id}/call-logs"
-                params = {
-                    'startDate': start_date,
-                    'endDate': end_date,
-                    'format': 'csv'
-                }
-                
-                logger.info(f"Making revised API request to: {call_logs_url}")
-                response = requests.get(call_logs_url, headers=headers, params=params)
-                
-                if response.status_code == 200:
-                    logger.info("Successfully retrieved data from Ringba API")
+                for endpoint in api_endpoints:
+                    logger.info(f"Trying API endpoint: {endpoint}")
                     
-                    # Save response content to a CSV file
-                    download_dir = "/tmp"
-                    os.makedirs(download_dir, exist_ok=True)
-                    file_path = os.path.join(download_dir, f"ringba_api_{int(time.time())}.csv")
+                    params = {
+                        'startDate': start_date,
+                        'endDate': end_date,
+                        'format': 'csv'
+                    }
                     
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(response.text)
-                    
-                    logger.info(f"Saved API response to {file_path}")
-                    
-                    # Verify it's a valid CSV
                     try:
-                        df = pd.read_csv(file_path)
-                        logger.info(f"API CSV has {len(df)} rows and {len(df.columns)} columns")
-                        return file_path
+                        response = requests.get(endpoint, headers=headers, params=params)
+                        
+                        if response.status_code == 200:
+                            logger.info("Successfully retrieved data from Ringba API")
+                            
+                            # Save response content to a CSV file
+                            download_dir = "/tmp"
+                            os.makedirs(download_dir, exist_ok=True)
+                            file_path = os.path.join(download_dir, f"ringba_api_{int(time.time())}.csv")
+                            
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(response.text)
+                            
+                            logger.info(f"Saved API response to {file_path}")
+                            
+                            # Verify it's a valid CSV
+                            try:
+                                df = pd.read_csv(file_path)
+                                logger.info(f"API CSV has {len(df)} rows and {len(df.columns)} columns")
+                                return file_path
+                            except Exception as e:
+                                logger.warning(f"API response not a valid CSV: {str(e)}")
+                        else:
+                            logger.warning(f"API call to {endpoint} failed with status {response.status_code}")
                     except Exception as e:
-                        logger.warning(f"API response not a valid CSV: {str(e)}")
-                else:
-                    logger.warning(f"API call failed with status {response.status_code}: {response.text}")
+                        logger.warning(f"Error calling API endpoint {endpoint}: {str(e)}")
             else:
                 logger.warning("Missing API token or account ID, can't use API fallback")
         except Exception as e:
