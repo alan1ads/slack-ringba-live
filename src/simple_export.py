@@ -600,170 +600,142 @@ def click_export_csv(browser):
             try {
                 console.log('Attempting targeted extraction for Ringba summary table');
                 
-                // Look specifically for the Summary table section
-                const summarySection = document.querySelector('.summary') || 
-                                      document.querySelector('.summary-container') || 
-                                      document.querySelector('.summary-section');
+                // Check if we can see the table headers first
+                const tableHeaders = document.querySelectorAll('th, [role="columnheader"]');
+                console.log(`Found ${tableHeaders.length} table headers`);
                 
-                // Expected column names based on screenshot - these MUST match what the Python code expects
+                // Extract header texts for debug
+                const headerTexts = [];
+                tableHeaders.forEach(th => headerTexts.push(th.textContent.trim()));
+                console.log('Header texts:', headerTexts.join(', '));
+                
+                // Expected column names based on screenshot
                 const expectedHeaders = ['Campaign', 'Publisher', 'Target', 'Buyer', 'Dialed #', 
                                     'Number Pool', 'Date', 'Duplicate', 'Tags', 'RPC', 'Revenue', 'Payout'];
                 
-                // Find the main table
-                const mainTable = summarySection ? 
-                                  summarySection.querySelector('table') : 
-                                  document.querySelector('table');
+                // Use the headers we found or fall back to expected headers
+                const headers = headerTexts.length >= 3 ? headerTexts : expectedHeaders;
                 
-                if (mainTable) {
-                    console.log('Found main summary table');
-                    
-                    // Get all rows including headers, data rows, and totals
-                    const allRows = mainTable.querySelectorAll('tr, [role="row"]');
-                    console.log(`Found ${allRows.length} total rows in the table`);
-                    
-                    // Skip the first row (header) and last row (totals)
-                    // This ensures we get the data rows in between
-                    const dataRows = Array.from(allRows).slice(1, -1);
-                    console.log(`Targeting ${dataRows.length} data rows (excluding header and totals)`);
-                    
-                    // If no data rows found using slice, try all non-header rows
-                    let processedRows = dataRows;
-                    if (dataRows.length === 0) {
-                        // Try identifying data rows by their structure
-                        processedRows = Array.from(allRows).filter(row => {
-                            // Skip rows with th elements (headers)
-                            if (row.querySelector('th')) return false;
-                            
-                            // Skip rows with "Totals" text
-                            if (row.textContent.includes('Totals')) return false;
-                            
-                            // Skip very short rows
-                            const cells = row.querySelectorAll('td, [role="cell"]');
-                            if (cells.length < 3) return false;
-                            
-                            return true;
-                        });
-                        console.log(`Found ${processedRows.length} data rows using structure filter`);
-                    }
-                    
-                    // Extract headers from the first row
-                    const headerRow = allRows[0];
-                    const headerCells = headerRow.querySelectorAll('th, [role="columnheader"]');
-                    
-                    const extractedHeaders = [];
-                    headerCells.forEach(cell => {
-                        // Get text content of the cell, including any nested elements
-                        let headerText = cell.textContent.trim();
+                // First try direct approach - find all cells on the page with data
+                // This extracts even if we can't identify the table structure
+                console.log("Direct cell extraction approach");
+                
+                // Find ALL div/span elements that might contain cell data
+                const allTexts = Array.from(document.querySelectorAll('td, [role="cell"], div, span'))
+                    .filter(el => {
+                        // Only leaf nodes (no children elements)
+                        if (el.children.length > 0) return false;
                         
-                        // Check if header contains a button (common in sortable tables)
-                        const buttonText = cell.querySelector('button, .mat-sort-header-container')?.textContent.trim();
-                        if (buttonText) {
-                            headerText = buttonText;
-                        }
+                        // Has text content
+                        if (!el.textContent.trim()) return false;
                         
-                        // Clean up the header text
-                        headerText = headerText.replace(/▼|▲|↓|↑/g, '').trim();
+                        // Not a button or link
+                        if (el.tagName === 'BUTTON' || el.tagName === 'A') return false;
                         
-                        if (headerText) {
-                            extractedHeaders.push(headerText);
-                        }
+                        // Not too short (likely not a cell value)
+                        if (el.textContent.trim().length < 2) return false;
+                        
+                        return true;
                     });
+                
+                console.log(`Found ${allTexts.length} text elements that might be cells`);
+                
+                // Group texts by their vertical position to identify rows
+                const rows = [];
+                const rowsByPosition = {};
+                
+                allTexts.forEach(el => {
+                    // Get position
+                    const rect = el.getBoundingClientRect();
+                    // Use a ~10px range for grouping by vertical position
+                    const rowPosition = Math.floor(rect.top / 10) * 10;
                     
-                    console.log(`Extracted ${extractedHeaders.length} headers:`, extractedHeaders);
+                    // Initialize row array if needed
+                    if (!rowsByPosition[rowPosition]) {
+                        rowsByPosition[rowPosition] = [];
+                    }
                     
-                    // If headers were successfully extracted, use them
-                    const headers = extractedHeaders.length >= 3 ? extractedHeaders : expectedHeaders;
-                    
-                    // Extract data from rows
-                    const extractedRows = [];
-                    
-                    // Process each row to extract cell values
-                    processedRows.forEach(row => {
-                        const cells = row.querySelectorAll('td, [role="cell"]');
-                        if (cells.length === 0) return;
-                        
-                        // Create row object with proper column mapping
-                        const rowData = {};
-                        
-                        // Map cells to headers
-                        for (let i = 0; i < Math.min(cells.length, headers.length); i++) {
-                            let cellValue = cells[i].textContent.trim();
-                            // Clean up cell value if needed (remove extra spaces, special chars)
-                            rowData[headers[i]] = cellValue;
-                        }
-                        
-                        // Make sure we have some data
-                        if (Object.keys(rowData).length > 0) {
-                            extractedRows.push(rowData);
-                        }
+                    // Add to row group
+                    rowsByPosition[rowPosition].push({
+                        text: el.textContent.trim(),
+                        x: rect.left,
+                        element: el
                     });
+                });
+                
+                // Sort cells within each row by x position (left to right)
+                Object.keys(rowsByPosition).forEach(rowPos => {
+                    const rowCells = rowsByPosition[rowPos].sort((a, b) => a.x - b.x);
                     
-                    // Direct scan for RPC values in case the table structure is unusual
-                    if (extractedRows.length === 0) {
-                        console.log('No rows extracted from table structure, scanning for RPC values');
-                        
-                        // Find all elements containing dollar amounts (potential RPC values)
-                        const rpcElements = Array.from(document.querySelectorAll('*'))
-                            .filter(el => {
-                                // Only consider leaf nodes (no children)
-                                if (el.children.length > 0) return false;
-                                
-                                // Look for dollar amounts
-                                const text = el.textContent.trim();
-                                return /\$\d+\.\d+/.test(text);
-                            });
-                        
-                        console.log(`Found ${rpcElements.length} potential RPC value elements`);
-                        
-                        if (rpcElements.length > 0) {
-                            // For each RPC element, try to find its row
-                            rpcElements.forEach(rpcEl => {
-                                // Find the closest row or row-like container
-                                const rowContainer = rpcEl.closest('tr') || 
-                                                    rpcEl.closest('[role="row"]') || 
-                                                    rpcEl.closest('.row') ||
-                                                    rpcEl.parentElement;
-                                
-                                if (!rowContainer) return;
-                                
-                                // If we've already processed this row, skip
-                                if (rowContainer.__processed) return;
-                                rowContainer.__processed = true;
-                                
-                                // Get all cells in this row (siblings or children of container)
-                                const siblings = Array.from(rowContainer.querySelectorAll('td, [role="cell"], span, div'))
-                                    .filter(el => el.children.length === 0 && el.textContent.trim());
-                                
-                                // Create a row object with our expected headers
-                                const rowData = {};
-                                for (let i = 0; i < Math.min(siblings.length, expectedHeaders.length); i++) {
-                                    rowData[expectedHeaders[i]] = siblings[i].textContent.trim();
-                                }
-                                
-                                // Make sure we set the RPC value
-                                if (!rowData['RPC'] || !rowData['RPC'].includes('$')) {
-                                    rowData['RPC'] = rpcEl.textContent.trim();
-                                }
-                                
-                                // Only add if we have enough data
-                                if (Object.keys(rowData).length >= 3) {
-                                    extractedRows.push(rowData);
-                                }
-                            });
-                        }
+                    // Skip rows with too few cells
+                    if (rowCells.length < 3) return;
+                    
+                    // Create row data object
+                    const rowData = {};
+                    for (let i = 0; i < Math.min(rowCells.length, headers.length); i++) {
+                        rowData[headers[i]] = rowCells[i].text;
                     }
                     
-                    console.log(`Successfully extracted ${extractedRows.length} data rows from table`);
-                    
-                    if (extractedRows.length > 0) {
-                        bestData = {
-                            headers: headers,
-                            rows: extractedRows
-                        };
-                        maxRows = extractedRows.length;
+                    // Only add rows that have key data fields
+                    if (rowData.Target && rowData.RPC) {
+                        rows.push(rowData);
                     }
+                });
+                
+                console.log(`Extracted ${rows.length} rows by direct cell extraction`);
+                
+                // If direct cell approach found rows, use them
+                if (rows.length > 0) {
+                    console.log("Using rows from direct cell extraction");
+                    bestData = {
+                        headers: headers,
+                        rows: rows
+                    };
+                    maxRows = rows.length;
                 } else {
-                    console.log('No main table found, trying alternative extraction methods');
+                    // Traditional approach - find the table element
+                    const mainTable = document.querySelector('table, [role="grid"]');
+                    
+                    if (mainTable) {
+                        console.log('Found main table element:', mainTable.tagName);
+                        
+                        // Get all rows
+                        const tableRows = mainTable.querySelectorAll('tr, [role="row"]');
+                        console.log(`Found ${tableRows.length} rows in main table`);
+                        
+                        // Extract rows data
+                        const extractedRows = [];
+                        
+                        Array.from(tableRows).forEach((row, idx) => {
+                            // Skip header row(s)
+                            if (row.querySelector('th') || idx === 0) return;
+                            
+                            // Get all cells
+                            const cells = row.querySelectorAll('td, [role="cell"]');
+                            if (cells.length < 3) return;
+                            
+                            // Create row data object
+                            const rowData = {};
+                            for (let i = 0; i < Math.min(cells.length, headers.length); i++) {
+                                rowData[headers[i]] = cells[i].textContent.trim();
+                            }
+                            
+                            // Only add if we have data in required columns
+                            if (Object.keys(rowData).length >= 3) {
+                                extractedRows.push(rowData);
+                            }
+                        });
+                        
+                        console.log(`Extracted ${extractedRows.length} rows from main table`);
+                        
+                        if (extractedRows.length > 0) {
+                            bestData = {
+                                headers: headers,
+                                rows: extractedRows
+                            };
+                            maxRows = extractedRows.length;
+                        }
+                    }
                 }
             } catch (e) {
                 console.error('Error in targeted Ringba extraction:', e);
@@ -1083,55 +1055,60 @@ def click_export_csv(browser):
                 const exactButtonMatches = Array.from(document.querySelectorAll('button'))
                     .filter(el => el.textContent.trim() === 'EXPORT CSV');
                 
-                if (exactButtonMatches.length > 0) {
-                    const button = exactButtonMatches[0];
-                    logDownloadInfo('Found exact EXPORT CSV button: ' + button.outerHTML);
-                    button.click();
-                    return 'Clicked exact EXPORT CSV button';
+                // Find by class name containing "export"
+                const exportButtons = Array.from(document.querySelectorAll('button[class*="export"], .export-button, .export-summary-btn'));
+                
+                // First check if button is disabled
+                const allButtons = [...exactButtonMatches, ...exportButtons];
+                
+                if (allButtons.length > 0) {
+                    // Check if any buttons are enabled
+                    const enabledButtons = allButtons.filter(btn => !btn.disabled && !btn.hasAttribute('disabled'));
+                    
+                    if (enabledButtons.length > 0) {
+                        // Use the first enabled button
+                        const button = enabledButtons[0];
+                        logDownloadInfo('Found enabled export button: ' + button.outerHTML);
+                        button.click();
+                        return 'Clicked enabled export button';
+                    } else {
+                        // All buttons are disabled - try to wait and see if they become enabled
+                        const firstButton = allButtons[0];
+                        logDownloadInfo('Found export button but it is disabled: ' + firstButton.outerHTML);
+                        
+                        // Try to find why it might be disabled
+                        if (document.querySelectorAll('.loading, .loading-indicator, .spinner').length > 0) {
+                            logDownloadInfo('Page appears to be loading, button may be temporarily disabled');
+                        }
+                        
+                        // Log all buttons found for debugging
+                        allButtons.forEach((btn, i) => {
+                            logDownloadInfo(`Button ${i+1}: ${btn.outerHTML}`);
+                        });
+                        
+                        return 'Export button found but disabled';
+                    }
                 }
                 
-                // Try upper corner button in data grid section
-                const upperCornerButtons = Array.from(document.querySelectorAll('button'))
-                    .filter(b => {
-                        // Check if button is in upper right of a section/component
-                        const rect = b.getBoundingClientRect();
-                        const isInUpperRight = rect.top < window.innerHeight / 2 && rect.right > window.innerWidth / 2;
-                        return isInUpperRight && b.textContent.toLowerCase().includes('export');
-                    });
-                
-                if (upperCornerButtons.length > 0) {
-                    const button = upperCornerButtons[0];
-                    logDownloadInfo('Found upper corner export button: ' + button.outerHTML);
-                    button.click();
-                    return 'Clicked upper corner export button';
-                }
-                
-                // Find by matching style from screenshot - button with class containing "export"
-                const styledButtons = Array.from(document.querySelectorAll('button[class*="export"], button[class*="csv"], .export-button'))
-                    .filter(b => b.textContent.toLowerCase().includes('export') || b.textContent.toLowerCase().includes('csv'));
-                
-                if (styledButtons.length > 0) {
-                    const button = styledButtons[0];
-                    logDownloadInfo('Found export button by style: ' + button.outerHTML);
-                    button.click();
-                    return 'Clicked export button by style';
-                }
-                
-                // Look for generic export buttons
-                const exportButtons = Array.from(document.querySelectorAll('button, a, span, div'))
+                // Try more general approach if specific methods fail
+                const anyExportButtons = Array.from(document.querySelectorAll('button, a, span, div'))
                     .filter(el => el.textContent && 
                         (el.textContent.toLowerCase().includes('export') || 
                          el.textContent.toLowerCase().includes('csv')));
                 
-                if (exportButtons.length > 0) {
+                if (anyExportButtons.length > 0) {
                     // Sort by likelihood of being the export button
-                    exportButtons.sort((a, b) => {
+                    anyExportButtons.sort((a, b) => {
                         // Exact match gets highest priority
                         const aText = a.textContent.toLowerCase().trim();
                         const bText = b.textContent.toLowerCase().trim();
                         
                         if (aText === 'export csv' && bText !== 'export csv') return -1;
                         if (bText === 'export csv' && aText !== 'export csv') return 1;
+                        
+                        // Enabled buttons get priority
+                        if (!a.disabled && b.disabled) return -1;
+                        if (a.disabled && !b.disabled) return 1;
                         
                         // Button elements get priority
                         if (a.tagName === 'BUTTON' && b.tagName !== 'BUTTON') return -1;
@@ -1141,11 +1118,17 @@ def click_export_csv(browser):
                         return aText.length - bText.length;
                     });
                     
+                    // Warn if best candidate is disabled
+                    const bestButton = anyExportButtons[0];
+                    if (bestButton.disabled || bestButton.hasAttribute('disabled')) {
+                        logDownloadInfo(`Best candidate button is disabled: ${bestButton.outerHTML}`);
+                        return 'Best export button candidate is disabled';
+                    }
+                    
                     // Click the best candidate
-                    const button = exportButtons[0];
-                    logDownloadInfo('Clicking: ' + button.tagName + ' with text: ' + button.textContent.trim());
-                    button.click();
-                    return 'Clicked button: ' + button.textContent.trim();
+                    logDownloadInfo('Clicking: ' + bestButton.tagName + ' with text: ' + bestButton.textContent.trim());
+                    bestButton.click();
+                    return 'Clicked button: ' + bestButton.textContent.trim();
                 }
                 
                 logDownloadInfo('No export buttons found');
@@ -1200,6 +1183,70 @@ def click_export_csv(browser):
             result = browser.execute_script("return window.findAndClickExportButton();")
             logger.info(f"JavaScript export button click result: {result}")
             export_clicked = True
+            
+            # Check if button was found but disabled
+            if "disabled" in result:
+                logger.warning("Export button is disabled - waiting to see if it becomes enabled")
+                
+                # Wait up to 30 seconds to see if button becomes enabled
+                wait_time = 30
+                start_wait = time.time()
+                button_enabled = False
+                
+                while time.time() - start_wait < wait_time:
+                    # Check if button is now enabled
+                    check_result = browser.execute_script("""
+                        const exportButtons = Array.from(document.querySelectorAll('button[class*="export"], .export-button, .export-summary-btn, button'));
+                        const enabledButtons = exportButtons.filter(btn => {
+                            return btn.textContent.toLowerCase().includes('export') && 
+                                   !btn.disabled && 
+                                   !btn.hasAttribute('disabled');
+                        });
+                        if (enabledButtons.length > 0) {
+                            console.log('Found enabled button:', enabledButtons[0].outerHTML);
+                            enabledButtons[0].click();
+                            return true;
+                        }
+                        return false;
+                    """)
+                    
+                    if check_result:
+                        logger.info("Export button became enabled and was clicked")
+                        button_enabled = True
+                        export_clicked = True
+                        break
+                    
+                    # Wait a bit before checking again
+                    time.sleep(3)
+                
+                if not button_enabled:
+                    logger.warning("Export button remained disabled after waiting - will rely on table extraction instead")
+                    # Force table extraction by returning None early
+                    return browser.execute_script("""
+                        // Try to check why button might be disabled
+                        const statusText = document.querySelector('.status-text, .error-text, .message')?.textContent;
+                        if (statusText) {
+                            console.log('Status message found:', statusText);
+                        }
+                        
+                        // Check if we're in a preview or limited data mode
+                        const previewMode = document.querySelector('.preview-mode, .limited-data');
+                        if (previewMode) {
+                            console.log('Page appears to be in preview mode');
+                        }
+                        
+                        // log any error messages
+                        const errors = document.querySelectorAll('.error, .alert, [role="alert"]');
+                        if (errors.length > 0) {
+                            console.log('Found error messages:');
+                            errors.forEach(err => console.log(' - ' + err.textContent.trim()));
+                        }
+                        
+                        return null;
+                    """)
+            else:
+                # Button was clicked or not found
+                export_clicked = True
             
             # If that didn't work, use Selenium to try specific XPath or CSS selector
             if "No buttons found" in result:
