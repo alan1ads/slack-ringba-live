@@ -514,154 +514,226 @@ def click_export_csv(browser):
         ringba_structure_data = browser.execute_script("""
             console.log('Starting direct Ringba UI structure extraction...');
             
-            // Specific to Ringba UI - look for the Summary section with the table
-            function extractRingbaUI() {
-                // Look for the "Summary" text/header on the page
-                const summaryHeaders = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, div'))
-                    .filter(el => el.textContent.trim() === 'Summary');
+            // Specific method to extract data from ag-Grid components (which Ringba uses)
+            function extractAgGridData() {
+                console.log('Looking for ag-Grid components...');
                 
-                console.log(`Found ${summaryHeaders.length} Summary headers`);
+                // First identify the ag-Grid containers
+                const agGridElements = document.querySelectorAll('.ag-root, [class*="ag-root"]');
+                console.log(`Found ${agGridElements.length} ag-Grid elements`);
                 
-                // Look for the campaign/target/publisher column headers in ANY context
-                const targetColumnTextContent = ['Campaign', 'Publisher', 'Target', 'Buyer', 'RPC', 'Revenue'];
-                const columnHeaders = [];
+                // Look specifically for the summary grid at the bottom of the page (where Target and RPC columns are)
+                // This is likely the second grid based on the screenshot
+                let summaryGrid = null;
+                let targetColumnIndex = -1;
+                let rpcColumnIndex = -1;
                 
-                // Find all elements with these text contents
-                targetColumnTextContent.forEach(text => {
-                    const elements = Array.from(document.querySelectorAll('*'))
-                        .filter(el => el.textContent.trim() === text);
-                    
-                    if (elements.length > 0) {
-                        console.log(`Found ${elements.length} elements with text "${text}"`);
-                        columnHeaders.push(...elements);
+                // First look for the "Summary" section which contains our grid
+                const summarySection = document.querySelector('.summary-section, [id*="summary"], [class*="summary"]');
+                if (summarySection) {
+                    summaryGrid = summarySection.querySelector('.ag-root, [class*="ag-root"]');
+                }
+                
+                // If we didn't find it that way, check if one of the grids we found has Target and RPC headers
+                if (!summaryGrid && agGridElements.length > 0) {
+                    // Check each grid for Target and RPC headers
+                    for (const grid of agGridElements) {
+                        const headerCells = grid.querySelectorAll('.ag-header-cell, [class*="header-cell"], [role="columnheader"]');
+                        
+                        // Check if this grid has both Target and RPC headers
+                        let hasTarget = false;
+                        let hasRPC = false;
+                        
+                        headerCells.forEach((cell, index) => {
+                            const text = cell.textContent.trim();
+                            if (text === 'Target') {
+                                hasTarget = true;
+                                targetColumnIndex = index;
+                            } else if (text === 'RPC') {
+                                hasRPC = true;
+                                rpcColumnIndex = index;
+                            }
+                        });
+                        
+                        if (hasTarget && hasRPC) {
+                            summaryGrid = grid;
+                            break;
+                        }
                     }
-                });
+                    
+                    // If we didn't find a grid with both Target and RPC, use the last grid (often the main data grid)
+                    if (!summaryGrid && agGridElements.length > 0) {
+                        summaryGrid = agGridElements[agGridElements.length - 1];
+                    }
+                }
                 
-                // If we found column headers, try to find their parent table
-                if (columnHeaders.length > 0) {
-                    console.log(`Found ${columnHeaders.length} potential column headers`);
+                if (summaryGrid) {
+                    console.log('Found summary grid for extraction');
                     
-                    // Group headers that are in the same container (likely the same row)
-                    const headerGroups = {};
-                    columnHeaders.forEach(header => {
-                        // Look for parent elements that might be a row or header container
-                        let parent = header.parentElement;
-                        let depth = 0;
-                        const maxDepth = 5; // Don't go too far up the tree
+                    // First identify the column headers to find Target and RPC columns
+                    const headerCells = summaryGrid.querySelectorAll('.ag-header-cell, [class*="header-cell"], [role="columnheader"]');
+                    
+                    // Extract header texts
+                    const headers = [];
+                    headerCells.forEach(cell => {
+                        const headerText = cell.textContent.trim();
+                        headers.push(headerText);
                         
-                        while (parent && depth < maxDepth) {
-                            const key = parent.tagName + '|' + parent.className;
-                            if (!headerGroups[key]) {
-                                headerGroups[key] = { element: parent, headers: [] };
-                            }
-                            headerGroups[key].headers.push({
-                                element: header,
-                                text: header.textContent.trim()
-                            });
-                            parent = parent.parentElement;
-                            depth++;
+                        // Track the indices of our target columns
+                        if (headerText === 'Target') {
+                            targetColumnIndex = headers.length - 1;
+                        } else if (headerText === 'RPC') {
+                            rpcColumnIndex = headers.length - 1;
                         }
                     });
                     
-                    // Find the parent with the most headers (likely the header row)
-                    let bestParent = null;
-                    let maxHeaders = 0;
+                    console.log(`Found headers: ${headers.join(', ')}`);
+                    console.log(`Target column index: ${targetColumnIndex}, RPC column index: ${rpcColumnIndex}`);
                     
-                    Object.values(headerGroups).forEach(group => {
-                        if (group.headers.length > maxHeaders) {
-                            maxHeaders = group.headers.length;
-                            bestParent = group.element;
+                    // Try two approaches to get the cell data
+                    
+                    // APPROACH 1: Use direct cell access
+                    const rows = [];
+                    
+                    // Find all row elements in the grid
+                    const rowElements = summaryGrid.querySelectorAll('.ag-row, [class*="ag-row"], [role="row"]');
+                    
+                    // Skip the first row if it looks like a header row
+                    const startIndex = rowElements.length > 0 && rowElements[0].classList.contains('ag-header-row') ? 1 : 0;
+                    
+                    // Process each data row
+                    for (let i = startIndex; i < rowElements.length; i++) {
+                        const rowElement = rowElements[i];
+                        
+                        // Skip if this is a header row
+                        if (rowElement.classList.contains('ag-header-row') || 
+                            rowElement.getAttribute('role') === 'columnheader') {
+                            continue;
+                        }
+                        
+                        // Get cells in this row
+                        const cells = rowElement.querySelectorAll('.ag-cell, [class*="ag-cell"], [role="gridcell"]');
+                        
+                        // If Target and RPC column indices are known, use them directly
+                        if (targetColumnIndex >= 0 && rpcColumnIndex >= 0 && cells.length > Math.max(targetColumnIndex, rpcColumnIndex)) {
+                            const targetText = cells[targetColumnIndex].textContent.trim();
+                            const rpcText = cells[rpcColumnIndex].textContent.trim();
+                            
+                            // Add this row if we got both values
+                            if (targetText && rpcText) {
+                                rows.push({
+                                    Target: targetText,
+                                    RPC: rpcText
+                                });
+                            }
+                        } 
+                        // Otherwise try to map cells to headers
+                        else if (cells.length > 0 && headers.length > 0) {
+                            const rowData = {};
+                            
+                            for (let j = 0; j < Math.min(cells.length, headers.length); j++) {
+                                rowData[headers[j]] = cells[j].textContent.trim();
+                            }
+                            
+                            // Only add if we have Target data
+                            if (rowData.Target && (rowData.RPC || rowData.Revenue)) {
+                                rows.push(rowData);
+                            }
+                        }
+                    }
+                    
+                    // If we found rows, return them
+                    if (rows.length > 0) {
+                        console.log(`Extracted ${rows.length} rows from ag-Grid`);
+                        return { headers, rows };
+                    }
+                    
+                    // APPROACH 2: Use cell position to find data values
+                    // This works better with complex ag-Grid layouts with cell spans
+                    
+                    // Find the exact positions of the Target and RPC column headers
+                    let targetHeaderPosition = null;
+                    let rpcHeaderPosition = null;
+                    
+                    headerCells.forEach(cell => {
+                        const text = cell.textContent.trim();
+                        const rect = cell.getBoundingClientRect();
+                        
+                        if (text === 'Target') {
+                            targetHeaderPosition = {
+                                left: rect.left,
+                                width: rect.width,
+                                center: rect.left + rect.width / 2
+                            };
+                        } else if (text === 'RPC') {
+                            rpcHeaderPosition = {
+                                left: rect.left,
+                                width: rect.width,
+                                center: rect.left + rect.width / 2
+                            };
                         }
                     });
                     
-                    if (bestParent) {
-                        console.log(`Found header container with ${maxHeaders} headers`);
+                    // If we found position info for our columns
+                    if (targetHeaderPosition && rpcHeaderPosition) {
+                        // Find all cell elements that could contain data (including those outside the grid)
+                        const allCells = document.querySelectorAll('.ag-cell, [class*="ag-cell"], .cell, td, [role="gridcell"]');
                         
-                        // Try to find the table this header belongs to
-                        let tableElement = null;
-                        let parent = bestParent;
-                        let depth = 0;
-                        const maxDepth = 5;
+                        // Group cells by their y-position to determine rows
+                        const cellsByRow = {};
                         
-                        while (parent && depth < maxDepth) {
-                            if (parent.tagName === 'TABLE' || 
-                                parent.getAttribute('role') === 'grid' || 
-                                parent.getAttribute('role') === 'table') {
-                                tableElement = parent;
-                                break;
+                        allCells.forEach(cell => {
+                            const rect = cell.getBoundingClientRect();
+                            
+                            // Skip cells outside the grid area
+                            if (rect.top < 100) return; // Skip header areas
+                            
+                            // Group by y-position (rounded to handle slight offsets)
+                            const rowY = Math.round(rect.top / 5) * 5;
+                            
+                            if (!cellsByRow[rowY]) {
+                                cellsByRow[rowY] = [];
                             }
                             
-                            // Also check if this element contains rows and cells
-                            const hasCells = parent.querySelectorAll('td, th, [role="cell"], [role="columnheader"]').length > 0;
-                            const hasRows = parent.querySelectorAll('tr, [role="row"]').length > 0;
-                            
-                            if (hasCells && hasRows) {
-                                tableElement = parent;
-                                break;
-                            }
-                            
-                            parent = parent.parentElement;
-                            depth++;
-                        }
-                        
-                        if (tableElement) {
-                            console.log('Found table element containing headers');
-                            
-                            // Extract all headers from this row
-                            const headerRow = bestParent;
-                            const headerCells = headerRow.querySelectorAll('th, td, div, span');
-                            const headers = Array.from(headerCells)
-                                .map(cell => cell.textContent.trim())
-                                .filter(text => text.length > 0);
-                            
-                            console.log('Extracted headers:', headers);
-                            
-                            // Find all rows that might contain data
-                            // 1. Look for siblings of the header row
-                            let dataRows = [];
-                            const siblings = [];
-                            let sibling = headerRow.nextElementSibling;
-                            
-                            while (sibling) {
-                                siblings.push(sibling);
-                                sibling = sibling.nextElementSibling;
-                            }
-                            
-                            if (siblings.length > 0) {
-                                console.log(`Found ${siblings.length} sibling rows`);
-                                dataRows = siblings;
-                            } else {
-                                // 2. Look for children of the table that are not the header row
-                                const allRows = tableElement.querySelectorAll('tr, [role="row"], div[class*="row"]');
-                                dataRows = Array.from(allRows).filter(row => row !== headerRow);
-                                console.log(`Found ${dataRows.length} potential data rows`);
-                            }
-                            
-                            // Extract data from rows
-                            const rows = [];
-                            dataRows.forEach(row => {
-                                // Get all cells in this row
-                                const cells = row.querySelectorAll('td, [role="cell"], div, span');
-                                if (cells.length === 0) return;
-                                
-                                const rowData = {};
-                                const cellTexts = Array.from(cells)
-                                    .map(cell => cell.textContent.trim())
-                                    .filter(text => text.length > 0);
-                                
-                                // Map cell texts to headers
-                                for (let i = 0; i < Math.min(cellTexts.length, headers.length); i++) {
-                                    rowData[headers[i]] = cellTexts[i];
-                                }
-                                
-                                // Only include rows with sufficient data
-                                if (Object.keys(rowData).length >= 2) {
-                                    rows.push(rowData);
-                                }
+                            cellsByRow[rowY].push({
+                                element: cell,
+                                text: cell.textContent.trim(),
+                                left: rect.left,
+                                center: rect.left + rect.width / 2,
+                                width: rect.width
                             });
+                        });
+                        
+                        // Process each row of cells
+                        const positionRows = [];
+                        
+                        Object.values(cellsByRow).forEach(rowCells => {
+                            // Find the cell most aligned with Target column
+                            const targetCell = rowCells.find(cell => 
+                                Math.abs(cell.center - targetHeaderPosition.center) < targetHeaderPosition.width / 2);
                             
-                            console.log(`Extracted ${rows.length} data rows`);
-                            return { headers, rows };
+                            // Find the cell most aligned with RPC column
+                            const rpcCell = rowCells.find(cell => 
+                                Math.abs(cell.center - rpcHeaderPosition.center) < rpcHeaderPosition.width / 2);
+                            
+                            // If we found both cells
+                            if (targetCell && rpcCell) {
+                                // Skip if either cell doesn't have text or RPC doesn't look like a dollar amount
+                                if (!targetCell.text || !rpcCell.text || !rpcCell.text.includes('$')) return;
+                                
+                                positionRows.push({
+                                    Target: targetCell.text,
+                                    RPC: rpcCell.text
+                                });
+                            }
+                        });
+                        
+                        if (positionRows.length > 0) {
+                            console.log(`Extracted ${positionRows.length} rows using position-based approach`);
+                            return {
+                                headers: ['Target', 'RPC'],
+                                rows: positionRows
+                            };
                         }
                     }
                 }
@@ -669,191 +741,360 @@ def click_export_csv(browser):
                 return null;
             }
             
-            // Another approach - look specifically for dollar amounts and try to map them to targets
-            function findDollarTargetPairs() {
-                // Find all dollar amount elements (RPC values)
+            // Method to look for any visible table structure with Target and RPC columns
+            function findTableWithTargetAndRPC() {
+                // Check if there are any rows with target/RPC pairs visible in any part of the page
+                // Look specifically for dollar amounts which are likely RPC values
                 const dollarElements = Array.from(document.querySelectorAll('*'))
                     .filter(el => {
-                        // Skip elements with children (container elements)
                         if (el.children.length > 0) return false;
-                        
                         const text = el.textContent.trim();
-                        // Match specifically dollar amount pattern
-                        return /\\$\\d+(\\.\\d+)?/.test(text) && !text.includes('Threshold');
+                        return text.startsWith('$') && /\\$\\d+(\\.\\d+)?/.test(text);
                     });
                 
-                console.log(`Found ${dollarElements.length} dollar amount elements`);
+                console.log(`Found ${dollarElements.length} dollar value elements`);
                 
-                // For each dollar amount, find the corresponding target in the same row
+                // For each dollar value, attempt to find the corresponding Target value
                 const rows = [];
                 
                 dollarElements.forEach(dollarEl => {
                     const dollarRect = dollarEl.getBoundingClientRect();
                     const dollarValue = dollarEl.textContent.trim();
                     
-                    // Find elements that are in the same horizontal line (row)
+                    // Skip headers or labels
+                    if (dollarValue === '$' || dollarValue === 'RPC' || dollarValue.includes('Threshold')) return;
+                    
+                    // Try to find the Target value in the same row (horizontally aligned)
                     const sameRowElements = Array.from(document.querySelectorAll('*'))
                         .filter(el => {
-                            // Skip containers
                             if (el.children.length > 0) return false;
-                            // Skip empty text
-                            if (!el.textContent.trim()) return false;
-                            // Skip the dollar element itself
-                            if (el === dollarEl) return false;
-                            
                             const rect = el.getBoundingClientRect();
-                            // Check if element is in the same horizontal line (row)
+                            const text = el.textContent.trim();
+                            
+                            // Skip if empty or too short
+                            if (!text || text.length < 2) return false;
+                            
+                            // Skip if it's another dollar value or column header
+                            if (text.startsWith('$') || text === 'Target' || text === 'RPC') return false;
+                            
+                            // Check if it's in the same horizontal line (within 10px)
                             return Math.abs(rect.top - dollarRect.top) < 10;
                         });
                     
                     if (sameRowElements.length > 0) {
-                        // Sort by position (left to right)
-                        sameRowElements.sort((a, b) => 
-                            a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+                        // Find the most likely Target element - typically to the left of the RPC value
+                        // Sort by x-position (left to right)
+                        sameRowElements.sort((a, b) => {
+                            return a.getBoundingClientRect().left - b.getBoundingClientRect().left;
+                        });
                         
-                        // Create row data
-                        const rowData = {
-                            RPC: dollarValue
-                        };
-                        
-                        // Look for specific column types in the row
-                        const textContents = sameRowElements.map(el => el.textContent.trim());
-                        
-                        // Try to identify target, campaign, etc. by position and content
-                        // Usually the text to the left of the dollar amount
+                        // Look for elements to the left of the RPC value
                         const elementsToLeft = sameRowElements.filter(el => 
-                            el.getBoundingClientRect().left < dollarRect.left);
+                            el.getBoundingClientRect().right < dollarRect.left);
                         
                         if (elementsToLeft.length > 0) {
-                            // The rightmost element to the left is typically the target
+                            // The rightmost element to the left is typically the Target name
                             const targetElement = elementsToLeft[elementsToLeft.length - 1];
-                            rowData.Target = targetElement.textContent.trim();
                             
-                            // If there are more elements to the left, the one before target might be campaign
-                            if (elementsToLeft.length > 1) {
-                                rowData.Campaign = elementsToLeft[0].textContent.trim();
-                            }
-                        }
-                        
-                        // Add row if we have meaningful data
-                        if (Object.keys(rowData).length >= 2) {
-                            rows.push(rowData);
+                            rows.push({
+                                Target: targetElement.textContent.trim(),
+                                RPC: dollarValue
+                            });
                         }
                     }
                 });
                 
-                console.log(`Constructed ${rows.length} rows from dollar-target pairs`);
-                return {
-                    headers: ['Target', 'RPC', 'Campaign'],
-                    rows: rows
-                };
-            }
-            
-            // Yet another approach - scrape ALL text elements by position
-            function scrapeByPosition() {
-                // Get all leaf text nodes (elements with no children but with text)
-                const textElements = Array.from(document.querySelectorAll('*'))
-                    .filter(el => el.children.length === 0 && el.textContent.trim().length > 0);
-                
-                console.log(`Found ${textElements.length} text elements on page`);
-                
-                // Group elements by vertical position (to identify rows)
-                const rowGroups = {};
-                
-                textElements.forEach(el => {
-                    const rect = el.getBoundingClientRect();
-                    // Round to nearest 5px to group elements in the same row
-                    const rowKey = Math.round(rect.top / 5) * 5;
-                    
-                    if (!rowGroups[rowKey]) {
-                        rowGroups[rowKey] = [];
-                    }
-                    
-                    rowGroups[rowKey].push({
-                        element: el,
-                        text: el.textContent.trim(),
-                        left: rect.left
-                    });
-                });
-                
-                // Sort each row by horizontal position
-                const sortedRows = [];
-                
-                Object.keys(rowGroups).forEach(rowKey => {
-                    // Sort by left position
-                    const elements = rowGroups[rowKey].sort((a, b) => a.left - b.left);
-                    sortedRows.push({
-                        top: parseInt(rowKey),
-                        elements: elements
-                    });
-                });
-                
-                // Sort rows by vertical position
-                sortedRows.sort((a, b) => a.top - b.top);
-                
-                // Try to identify which row contains headers
-                let headerRowIndex = -1;
-                
-                for (let i = 0; i < sortedRows.length; i++) {
-                    const rowTexts = sortedRows[i].elements.map(el => el.text.toLowerCase());
-                    
-                    // Check if this row contains common header names
-                    const hasTarget = rowTexts.some(text => text === 'target');
-                    const hasRPC = rowTexts.some(text => text === 'rpc');
-                    const hasCampaign = rowTexts.some(text => text === 'campaign');
-                    
-                    if ((hasTarget && hasRPC) || (hasTarget && hasCampaign) || (hasRPC && hasCampaign)) {
-                        headerRowIndex = i;
-                        break;
-                    }
+                if (rows.length > 0) {
+                    console.log(`Constructed ${rows.length} Target/RPC pairs from dollar values`);
+                    return {
+                        headers: ['Target', 'RPC'],
+                        rows: rows
+                    };
                 }
                 
-                // If we found a header row, get headers and data rows
-                if (headerRowIndex >= 0) {
-                    const headerRow = sortedRows[headerRowIndex];
-                    const headers = headerRow.elements.map(el => el.text);
+                return null;
+            }
+            
+            // Try exact extraction from highlighted areas in screenshot
+            function extractHighlightedArea() {
+                // Look for all elements under headings "Target" and "RPC"
+                const targetHeader = Array.from(document.querySelectorAll('th, td, div, span'))
+                    .find(el => el.textContent.trim() === 'Target' && el.getBoundingClientRect().height < 50);
+                
+                const rpcHeader = Array.from(document.querySelectorAll('th, td, div, span'))
+                    .find(el => el.textContent.trim() === 'RPC' && el.getBoundingClientRect().height < 50);
+                
+                if (targetHeader && rpcHeader) {
+                    console.log('Found Target and RPC headers - using highlighted area extraction');
                     
-                    console.log('Found headers by position:', headers);
+                    // Get positions for these headers
+                    const targetHeaderRect = targetHeader.getBoundingClientRect();
+                    const rpcHeaderRect = rpcHeader.getBoundingClientRect();
                     
-                    // Use rows below the header as data rows
+                    // Find elements that might be data cells vertically aligned below these headers
+                    const allElements = Array.from(document.querySelectorAll('*'))
+                        .filter(el => el.children.length === 0 && el.textContent.trim().length > 0)
+                        .map(el => {
+                            const rect = el.getBoundingClientRect();
+                            return {
+                                element: el,
+                                text: el.textContent.trim(),
+                                rect: rect
+                            };
+                        });
+                    
+                    // Group elements by their vertical position to represent rows
+                    const rowGroups = {};
+                    allElements.forEach(item => {
+                        // Skip the header elements themselves
+                        if (item.element === targetHeader || item.element === rpcHeader) return;
+                        
+                        // Skip if above the headers
+                        if (item.rect.top <= Math.max(targetHeaderRect.bottom, rpcHeaderRect.bottom)) return;
+                        
+                        // Group by vertical position (rounded to nearest 5px to handle slight variations)
+                        const rowKey = Math.round(item.rect.top / 5) * 5;
+                        if (!rowGroups[rowKey]) {
+                            rowGroups[rowKey] = [];
+                        }
+                        rowGroups[rowKey].push(item);
+                    });
+                    
+                    // Process each row to extract Target and RPC pairs
                     const rows = [];
                     
-                    for (let i = headerRowIndex + 1; i < sortedRows.length; i++) {
-                        const row = sortedRows[i];
-                        const rowData = {};
+                    Object.values(rowGroups).forEach(rowItems => {
+                        let targetValue = null;
+                        let rpcValue = null;
                         
-                        // Skip if this row is too far from the header (likely unrelated content)
-                        if (row.top - headerRow.top > 500) break;
+                        // Find a value horizontally aligned with the Target header
+                        const targetCandidates = rowItems.filter(item => {
+                            const alignedWithTarget = Math.abs(item.rect.left - targetHeaderRect.left) < targetHeaderRect.width / 2 ||
+                                                     (item.rect.left > targetHeaderRect.left - 20 && 
+                                                      item.rect.right < targetHeaderRect.right + 20);
+                            return alignedWithTarget && !item.text.startsWith('$');
+                        });
                         
-                        // Map cells to headers
-                        for (let j = 0; j < Math.min(row.elements.length, headers.length); j++) {
-                            rowData[headers[j]] = row.elements[j].text;
+                        if (targetCandidates.length > 0) {
+                            // Use the item best aligned with the Target header
+                            targetCandidates.sort((a, b) => {
+                                return Math.abs(a.rect.left - targetHeaderRect.left) - 
+                                       Math.abs(b.rect.left - targetHeaderRect.left);
+                            });
+                            targetValue = targetCandidates[0].text;
                         }
                         
-                        // Check if this looks like a data row (has target or RPC)
-                        if ('Target' in rowData || 'RPC' in rowData) {
-                            rows.push(rowData);
+                        // Find a value horizontally aligned with the RPC header
+                        const rpcCandidates = rowItems.filter(item => {
+                            const alignedWithRPC = Math.abs(item.rect.left - rpcHeaderRect.left) < rpcHeaderRect.width / 2 ||
+                                                  (item.rect.left > rpcHeaderRect.left - 20 && 
+                                                   item.rect.right < rpcHeaderRect.right + 20);
+                            return alignedWithRPC && item.text.includes('$');
+                        });
+                        
+                        if (rpcCandidates.length > 0) {
+                            // Use the item best aligned with the RPC header
+                            rpcCandidates.sort((a, b) => {
+                                return Math.abs(a.rect.left - rpcHeaderRect.left) - 
+                                       Math.abs(b.rect.left - rpcHeaderRect.left);
+                            });
+                            rpcValue = rpcCandidates[0].text;
                         }
-                    }
+                        
+                        // Add row if we found both values
+                        if (targetValue && rpcValue) {
+                            rows.push({
+                                Target: targetValue,
+                                RPC: rpcValue
+                            });
+                        }
+                    });
                     
-                    console.log(`Extracted ${rows.length} rows by position`);
-                    return { headers, rows };
+                    if (rows.length > 0) {
+                        console.log(`Extracted ${rows.length} rows from highlighted areas`);
+                        return {
+                            headers: ['Target', 'RPC'],
+                            rows: rows
+                        };
+                    }
                 }
                 
                 return null;
             }
             
             // Try each approach in sequence
-            let result = extractRingbaUI();
+            console.log('Starting with ag-Grid extraction...');
+            let result = extractAgGridData();
             
             if (!result || !result.rows || result.rows.length === 0) {
-                console.log('First approach failed, trying dollar-target pairs...');
-                result = findDollarTargetPairs();
+                console.log('ag-Grid extraction failed, trying highlighted area extraction...');
+                result = extractHighlightedArea();
             }
             
             if (!result || !result.rows || result.rows.length === 0) {
-                console.log('Second approach failed, trying position-based extraction...');
-                result = scrapeByPosition();
+                console.log('Highlighted area extraction failed, trying dollar value extraction...');
+                result = findTableWithTargetAndRPC();
+            }
+            
+            if (!result || !result.rows || result.rows.length === 0) {
+                console.log('All specific extraction methods failed, trying original methods...');
+                
+                // Fall back to original extraction methods
+                function extractRingbaUI() {
+                    // Look for the "Summary" text/header on the page
+                    const summaryHeaders = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, div'))
+                        .filter(el => el.textContent.trim() === 'Summary');
+                    
+                    console.log(`Found ${summaryHeaders.length} Summary headers`);
+                    
+                    // Look for the campaign/target/publisher column headers in ANY context
+                    const targetColumnTextContent = ['Campaign', 'Publisher', 'Target', 'Buyer', 'RPC', 'Revenue'];
+                    const columnHeaders = [];
+                    
+                    // Find all elements with these text contents
+                    targetColumnTextContent.forEach(text => {
+                        const elements = Array.from(document.querySelectorAll('*'))
+                            .filter(el => el.textContent.trim() === text);
+                        
+                        if (elements.length > 0) {
+                            console.log(`Found ${elements.length} elements with text "${text}"`);
+                            columnHeaders.push(...elements);
+                        }
+                    });
+                    
+                    // If we found column headers, try to find their parent table
+                    if (columnHeaders.length > 0) {
+                        console.log(`Found ${columnHeaders.length} potential column headers`);
+                        
+                        // Group headers that are in the same container (likely the same row)
+                        const headerGroups = {};
+                        columnHeaders.forEach(header => {
+                            // Look for parent elements that might be a row or header container
+                            let parent = header.parentElement;
+                            let depth = 0;
+                            const maxDepth = 5; // Don't go too far up the tree
+                            
+                            while (parent && depth < maxDepth) {
+                                const key = parent.tagName + '|' + parent.className;
+                                if (!headerGroups[key]) {
+                                    headerGroups[key] = { element: parent, headers: [] };
+                                }
+                                headerGroups[key].headers.push({
+                                    element: header,
+                                    text: header.textContent.trim()
+                                });
+                                parent = parent.parentElement;
+                                depth++;
+                            }
+                        });
+                        
+                        // Find the parent with the most headers (likely the header row)
+                        let bestParent = null;
+                        let maxHeaders = 0;
+                        
+                        Object.values(headerGroups).forEach(group => {
+                            if (group.headers.length > maxHeaders) {
+                                maxHeaders = group.headers.length;
+                                bestParent = group.element;
+                            }
+                        });
+                        
+                        if (bestParent) {
+                            console.log(`Found header container with ${maxHeaders} headers`);
+                            
+                            // Try to find the table this header belongs to
+                            let tableElement = null;
+                            let parent = bestParent;
+                            let depth = 0;
+                            const maxDepth = 5;
+                            
+                            while (parent && depth < maxDepth) {
+                                if (parent.tagName === 'TABLE' || 
+                                    parent.getAttribute('role') === 'grid' || 
+                                    parent.getAttribute('role') === 'table') {
+                                    tableElement = parent;
+                                    break;
+                                }
+                                
+                                // Also check if this element contains rows and cells
+                                const hasCells = parent.querySelectorAll('td, th, [role="cell"], [role="columnheader"]').length > 0;
+                                const hasRows = parent.querySelectorAll('tr, [role="row"]').length > 0;
+                                
+                                if (hasCells && hasRows) {
+                                    tableElement = parent;
+                                    break;
+                                }
+                                
+                                parent = parent.parentElement;
+                                depth++;
+                            }
+                            
+                            if (tableElement) {
+                                console.log('Found table element containing headers');
+                                
+                                // Extract all headers from this row
+                                const headerRow = bestParent;
+                                const headerCells = headerRow.querySelectorAll('th, td, div, span');
+                                const headers = Array.from(headerCells)
+                                    .map(cell => cell.textContent.trim())
+                                    .filter(text => text.length > 0);
+                                
+                                console.log('Extracted headers:', headers);
+                                
+                                // Find all rows that might contain data
+                                // 1. Look for siblings of the header row
+                                let dataRows = [];
+                                const siblings = [];
+                                let sibling = headerRow.nextElementSibling;
+                                
+                                while (sibling) {
+                                    siblings.push(sibling);
+                                    sibling = sibling.nextElementSibling;
+                                }
+                                
+                                if (siblings.length > 0) {
+                                    console.log(`Found ${siblings.length} sibling rows`);
+                                    dataRows = siblings;
+                                } else {
+                                    // 2. Look for children of the table that are not the header row
+                                    const allRows = tableElement.querySelectorAll('tr, [role="row"], div[class*="row"]');
+                                    dataRows = Array.from(allRows).filter(row => row !== headerRow);
+                                    console.log(`Found ${dataRows.length} potential data rows`);
+                                }
+                                
+                                // Extract data from rows
+                                const rows = [];
+                                dataRows.forEach(row => {
+                                    // Get all cells in this row
+                                    const cells = row.querySelectorAll('td, [role="cell"], div, span');
+                                    if (cells.length === 0) return;
+                                    
+                                    const rowData = {};
+                                    const cellTexts = Array.from(cells)
+                                        .map(cell => cell.textContent.trim())
+                                        .filter(text => text.length > 0);
+                                    
+                                    // Map cell texts to headers
+                                    for (let i = 0; i < Math.min(cellTexts.length, headers.length); i++) {
+                                        rowData[headers[i]] = cellTexts[i];
+                                    }
+                                    
+                                    // Only include rows with sufficient data
+                                    if (Object.keys(rowData).length >= 2) {
+                                        rows.push(rowData);
+                                    }
+                                });
+                                
+                                console.log(`Extracted ${rows.length} data rows`);
+                                return { headers, rows };
+                            }
+                        }
+                    }
+                    
+                    return null;
+                }
+                
+                result = extractRingbaUI();
             }
             
             return result || { headers: [], rows: [] };
